@@ -2,9 +2,21 @@
 
 All notable changes to CursorDump are documented here.
 
-## [Unreleased]
+## [0.10.0] — 2026-07-08
+
+Data-source switching, a clearer vocabulary, chat-style session view, and
+compatibility with older Cursor transcript layouts.
 
 ### Added
+- **Chat-style session view.** Messages render as bubbles like a messaging
+  app — assistant left (deep green), user right (deep blue) — keeping all
+  badges, thinking toggles, tool chips, and inline attachments. Real
+  per-message timestamps (from the harness `<timestamp>` tag in user
+  records) show in the bubble corner where they exist; times are never
+  fabricated.
+- **Older transcript layout support.** The scanner now also reads the flat
+  `agent-transcripts/<id>.jsonl` layout used by earlier Cursor builds, and
+  the FAQ documents version compatibility (Cursor 2.x/3.x).
 - **Data-source switching in the UI.** A "Viewing" chip in the top bar shows
   whether you are on Live Cursor data or an opened backup (amber, with the
   backup's creation date), with a menu to switch: Live Cursor data, recent
@@ -38,6 +50,14 @@ All notable changes to CursorDump are documented here.
   cross-references between the export and backup dialogs.
 - Welcome panel: aligned card layout, and every card is clickable (focus
   finder, browse, export, backup, open backup).
+- Minimal-text top bar: icon-only media filter chips and tools dropdown
+  with tooltips, selection count as a badge on the export button, and a
+  keyboard-visible focus ring on all controls.
+- Missing referenced files collapse into a single expandable chip in the
+  session view instead of a wall of warning chips.
+- A stale access token now shows an on-screen explanation (with recovery
+  instructions) instead of a silently empty app, and the tokenized URL is
+  always printed at startup so additional browsers/tabs can be opened.
 
 ## [0.9.0] — 2026-07-07
 

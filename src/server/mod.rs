@@ -394,11 +394,12 @@ pub fn run(root: PathBuf, port: u16, open_browser: bool) -> anyhow::Result<()> {
         let base = format!("http://{}", listener.local_addr()?);
         let url = format!("{base}/?token={}", state.token);
         eprintln!("CursorDump running at {base} (read-only on ~/.cursor)");
+        // ALWAYS print the tokenized URL: the frontend strips the token from
+        // the address bar, so this line is the only way to open the app in
+        // another browser or after closing the tab.
+        eprintln!("Open: {url}");
         if open_browser {
             let _ = open::that(&url);
-        } else {
-            // Headless/manual launch: the token is required to reach the API.
-            eprintln!("Open: {url}");
         }
         // Warm the message index in the background so the first find is instant.
         {

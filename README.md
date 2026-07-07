@@ -50,6 +50,12 @@ its sha256 (mandatory), and installs to `~/.local/bin` (override with
 binaries are static (musl) and run on any distribution. You can also
 download an archive from the releases page manually.
 
+**Homebrew** (macOS and Linux):
+
+```bash
+brew install lpalbou/tap/cursordump
+```
+
 **From source** — requires Rust stable (1.75+):
 
 ```bash

@@ -24,6 +24,12 @@ The script verifies the release's sha256 and installs to `~/.local/bin`
 any distribution. Archives are also downloadable from the
 [releases page](https://github.com/lpalbou/cursordump/releases).
 
+**Homebrew** (macOS and Linux):
+
+```bash
+brew install lpalbou/tap/cursordump
+```
+
 **From source** (Rust stable, MSRV 1.75 — install via
 [rustup](https://rustup.rs)):
 

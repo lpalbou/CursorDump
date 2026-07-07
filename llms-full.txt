@@ -79,6 +79,12 @@ its sha256 (mandatory), and installs to `~/.local/bin` (override with
 binaries are static (musl) and run on any distribution. You can also
 download an archive from the releases page manually.
 
+**Homebrew** (macOS and Linux):
+
+```bash
+brew install lpalbou/tap/cursordump
+```
+
 **From source** — requires Rust stable (1.75+):
 
 ```bash
@@ -234,6 +240,12 @@ The script verifies the release's sha256 and installs to `~/.local/bin`
 `CURSORDUMP_VERSION=vX.Y.Z`). Linux binaries are static (musl) and run on
 any distribution. Archives are also downloadable from the
 [releases page](https://github.com/lpalbou/cursordump/releases).
+
+**Homebrew** (macOS and Linux):
+
+```bash
+brew install lpalbou/tap/cursordump
+```
 
 **From source** (Rust stable, MSRV 1.75 — install via
 [rustup](https://rustup.rs)):

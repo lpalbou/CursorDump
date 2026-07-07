@@ -55,6 +55,11 @@ pub struct MsgEntry {
 pub struct AppState {
     pub root: PathBuf,
     pub cursor_root: PathBuf,
+    /// Random per-run token required on every `/api/*` request. The browser
+    /// receives it via the opened URL; other local processes that cannot read
+    /// that URL cannot call the API (defends the "local, read-only" posture
+    /// beyond the loopback + Host guard).
+    pub token: String,
     /// Cached scan; refreshed via /api/rescan.
     pub projects: RwLock<Vec<Project>>,
     /// Lazily computed per-project facets (tools/media per session), keyed by
@@ -63,6 +68,12 @@ pub struct AppState {
     /// Lazily built message-level index for the unified finder. Cleared on
     /// rescan; built on first find.
     pub message_index: RwLock<Option<Arc<Vec<MsgEntry>>>>,
+    /// Bumped on every rescan. A build that started before a rescan must not
+    /// store its (stale) result over the cleared slot.
+    pub index_gen: std::sync::atomic::AtomicU64,
+    /// Serializes index builds so concurrent first-finds don't each pay the
+    /// full parse cost.
+    pub index_build: std::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -81,6 +92,10 @@ impl AppState {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        // Invalidate any in-flight index build BEFORE clearing the slot, so a
+        // stale build can't repopulate it.
+        self.index_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self
             .message_index
             .write()
@@ -94,11 +109,19 @@ impl AppState {
             .clone()
     }
 
-    pub fn store_index(&self, index: Arc<Vec<MsgEntry>>) {
-        *self
-            .message_index
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = Some(index);
+    /// Store a built index, but only if no rescan happened since the build
+    /// started (`gen` is the generation observed at build start).
+    pub fn store_index_if_current(&self, index: Arc<Vec<MsgEntry>>, gen: u64) {
+        if self.index_gen.load(std::sync::atomic::Ordering::SeqCst) == gen {
+            *self
+                .message_index
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = Some(index);
+        }
+    }
+
+    pub fn current_index_gen(&self) -> u64 {
+        self.index_gen.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn cached_facets(&self, slug: &str) -> Option<Vec<SessionFacet>> {
@@ -119,24 +142,84 @@ impl AppState {
 
 pub type SharedState = Arc<AppState>;
 
-/// Reject requests whose Host header is not a loopback name. This defeats
-/// DNS-rebinding: a malicious `evil.com` page cannot become same-origin with
-/// the local server (which would otherwise let it read transcripts and write
-/// files via /api/export). Only literal loopback hosts are accepted.
-async fn guard_host(req: Request, next: Next) -> Result<Response, StatusCode> {
+/// Random hex token generated per run.
+fn generate_token() -> String {
+    use std::io::Read;
+    let mut buf = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if f.read_exact(&mut buf).is_ok() {
+            return buf.iter().map(|b| format!("{b:02x}")).collect();
+        }
+    }
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{t:x}{:x}", std::process::id())
+}
+
+/// Host is a loopback name, and (for `/api/*`) a valid token is present.
+///
+/// - The Host allowlist defeats DNS-rebinding (a remote page can't become
+///   same-origin with the local server).
+/// - The token defeats other local processes / stray clients: only the browser
+///   tab we opened (which received the token in its URL) can call the API.
+///   `/api/media` is reached via `<img src>`/`<video>` which cannot set
+///   headers, so the token is also accepted as a `token` query parameter.
+async fn guard(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
     let host = req
         .headers()
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    // Strip an optional port; accept the host portion only.
     let name = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
-    let ok = matches!(name, "localhost" | "127.0.0.1" | "::1" | "[::1]") || name.is_empty();
-    if ok {
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::FORBIDDEN)
+    let host_ok = matches!(name, "localhost" | "127.0.0.1" | "::1" | "[::1]") || name.is_empty();
+    if !host_ok {
+        return Err(StatusCode::FORBIDDEN);
     }
+
+    if req.uri().path().starts_with("/api/") {
+        let from_header = req
+            .headers()
+            .get("x-cursordump-token")
+            .and_then(|h| h.to_str().ok())
+            .map(str::to_string);
+        let from_query = req.uri().query().and_then(|q| {
+            q.split('&').find_map(|kv| {
+                let (k, v) = kv.split_once('=')?;
+                (k == "token").then(|| urldecode(v))
+            })
+        });
+        let provided = from_header.or(from_query);
+        if provided.as_deref() != Some(state.token.as_str()) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    Ok(next.run(req).await)
+}
+
+/// Minimal percent-decode for the token query value (hex tokens rarely need
+/// it, but `%`-escapes are handled for safety).
+fn urldecode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 const INDEX_HTML: &str = include_str!("ui/index.html");
@@ -154,6 +237,9 @@ pub fn run(root: PathBuf, port: u16, open_browser: bool) -> anyhow::Result<()> {
         projects: RwLock::new(crate::scanner::scan_projects(&root)),
         facets: RwLock::new(std::collections::HashMap::new()),
         message_index: RwLock::new(None),
+        index_gen: std::sync::atomic::AtomicU64::new(0),
+        index_build: std::sync::Mutex::new(()),
+        token: generate_token(),
         root,
         cursor_root,
     });
@@ -179,23 +265,26 @@ pub fn run(root: PathBuf, port: u16, open_browser: bool) -> anyhow::Result<()> {
         .route("/api/facets", get(api::facets))
         .route("/api/session", get(api::session))
         .route("/api/media", get(api::media))
-        .route("/api/search", post(api::search))
         .route("/api/find", post(api::find))
         .route("/api/export", post(api::export))
         .route("/api/backup", post(api::backup))
         .route("/api/default_out_dir", get(api::default_out_dir))
         .route("/api/default_backup_dir", get(api::default_backup_dir))
-        .layer(middleware::from_fn(guard_host))
+        .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state.clone());
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        let url = format!("http://{}", listener.local_addr()?);
-        eprintln!("CursorDump running at {url} (read-only on ~/.cursor)");
+        let base = format!("http://{}", listener.local_addr()?);
+        let url = format!("{base}/?token={}", state.token);
+        eprintln!("CursorDump running at {base} (read-only on ~/.cursor)");
         if open_browser {
             let _ = open::that(&url);
+        } else {
+            // Headless/manual launch: the token is required to reach the API.
+            eprintln!("Open: {url}");
         }
         // Warm the message index in the background so the first find is instant.
         {

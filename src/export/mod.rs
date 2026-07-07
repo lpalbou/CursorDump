@@ -17,6 +17,7 @@
 pub mod clean;
 pub mod cpt;
 pub mod manifest;
+pub mod secrets;
 pub mod sft;
 pub mod subagent;
 
@@ -91,6 +92,10 @@ pub struct ExportOptions {
     pub val_fraction: f32,
     /// Emit a `metadata` object per record (project, session, ...).
     pub with_metadata: bool,
+    /// Replace detected secrets (API tokens, keys, bearer tokens) with
+    /// `[REDACTED_…]` markers in exported text. Off by default; the manifest
+    /// always REPORTS how many secrets remain regardless of this flag.
+    pub redact_secrets: bool,
     /// Split sessions whose rendered content exceeds this many characters
     /// into multiple records at turn boundaries (0 = never split).
     /// Default 100_000 chars ≈ 25k tokens: keeps records inside a 32k
@@ -117,6 +122,7 @@ impl Default for ExportOptions {
             min_turns: 1,
             val_fraction: 0.0,
             with_metadata: true,
+            redact_secrets: false,
             max_record_chars: 100_000,
         }
     }
@@ -155,6 +161,9 @@ pub struct ExportSummary {
     pub cpt_records: usize,
     pub media_copied: usize,
     pub media_referenced: usize,
+    /// Secrets detected in the FINAL written files, tallied by kind (0 if
+    /// redaction removed them).
+    pub secrets_detected: std::collections::BTreeMap<String, usize>,
     pub warnings: Vec<String>,
 }
 
@@ -172,7 +181,12 @@ pub fn validate_out_dir(out_dir: &Path, cursor_root: &Path) -> Result<(), String
             },
         }
     };
-    if canonical.starts_with(cursor_root) {
+    // Canonicalize the boundary too, so a symlink component in cursor_root
+    // can't make the containment check fail open.
+    let cursor_canon = cursor_root
+        .canonicalize()
+        .unwrap_or_else(|_| cursor_root.to_path_buf());
+    if canonical.starts_with(&cursor_canon) {
         return Err(format!(
             "refusing to export inside {} — pick a directory outside ~/.cursor",
             cursor_root.display()
@@ -237,10 +251,24 @@ pub fn run_export(
     // (Inline pulls their result into the master via the SubagentIndex).
     let keep_subagents =
         options.include_subagent_sessions || options.subagent_mode == SubagentMode::Separate;
-    let selected: Vec<SessionMeta> = sessions
+    let mut seen_paths = std::collections::HashSet::new();
+    let mut selected: Vec<SessionMeta> = sessions
         .into_iter()
         .filter(|s| keep_subagents || !s.is_subagent)
+        // Dedupe by transcript path: a repeated selection must not double the
+        // exported records.
+        .filter(|s| seen_paths.insert(s.path.clone()))
         .collect();
+    // Self-forked subagents (`resume: "self"`) are written to disk BOTH as a
+    // main transcript and as `subagents/<same-id>.jsonl` with identical
+    // content. Drop the subagent copy when a main transcript with the same
+    // session id is also selected, so Separate mode doesn't emit near-dupes.
+    let main_ids: std::collections::HashSet<String> = selected
+        .iter()
+        .filter(|s| !s.is_subagent)
+        .map(|s| s.id.clone())
+        .collect();
+    selected.retain(|s| !(s.is_subagent && main_ids.contains(&s.id)));
     let total = selected.len();
     let mut summary = ExportSummary {
         out_dir: out_dir.clone(),
@@ -329,8 +357,11 @@ pub struct RenderedTurn {
 }
 
 impl RenderedTurn {
+    /// Size used for chunking. Counts the LARGEST rendering this turn can
+    /// produce (native includes inlined Task results + tool calls, which
+    /// exceed thinking+answer), so `max_record_chars` bounds every mode.
     pub fn chars(&self) -> usize {
-        self.user.len() + self.thinking.len() + self.answer.len()
+        self.user.len() + self.thinking.len() + self.answer.len().max(self.native.len())
     }
 
     /// Assistant string for SFT, composed per thinking mode.
@@ -427,6 +458,9 @@ fn render_user(turn: &Turn, options: &ExportOptions) -> String {
         if options.clean_assistant {
             text = clean::strip_chat_links(&text);
         }
+        if options.redact_secrets {
+            text = secrets::redact(&text);
+        }
         let text = text.trim();
         if !text.is_empty() {
             parts.push(text.to_string());
@@ -503,11 +537,15 @@ fn render_assistant(
     if options.clean_assistant && !has_tool_content {
         answer = clean::strip_trailing_intent(&answer);
     }
-    (
-        thinking_parts.join("\n\n").trim().to_string(),
-        answer.trim().to_string(),
-        native_parts.join("\n\n").trim().to_string(),
-    )
+    let mut thinking = thinking_parts.join("\n\n").trim().to_string();
+    let mut answer = answer.trim().to_string();
+    let mut native = native_parts.join("\n\n").trim().to_string();
+    if options.redact_secrets {
+        thinking = secrets::redact(&thinking);
+        answer = secrets::redact(&answer);
+        native = secrets::redact(&native);
+    }
+    (thinking, answer, native)
 }
 
 fn render_tool_call(name: &str, input: &serde_json::Value) -> String {
@@ -539,6 +577,14 @@ fn render_task_inline(
     if task.background {
         return format!(
             "{call}\n\n```tool_result\n{{\"name\": \"Task\", \"status\": \"spawned_in_background\"}}\n```"
+        );
+    }
+    // A resumed Task re-prompts a child whose FINAL answer was already spliced
+    // into the original call. Repeating it here would duplicate the same
+    // (often large) output within one record, so emit a status instead.
+    if task.match_kind == subagent::MatchKind::Resume {
+        return format!(
+            "{call}\n\n```tool_result\n{{\"name\": \"Task\", \"status\": \"resumed\"}}\n```"
         );
     }
     let Some(result) = &task.result else {

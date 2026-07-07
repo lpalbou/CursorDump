@@ -41,14 +41,17 @@ pub fn finalize(
                 "original_path": media_ref.path.display().to_string(),
                 "kind": media_ref.kind.label(),
                 "exists": media_ref.exists,
+                "origin": if media_ref.within_cursor { "cursor" } else { "external" },
                 "copied_to": serde_json::Value::Null,
                 "sha256": serde_json::Value::Null,
                 "trainable_text": media_ref.kind == MediaKind::Readable,
             });
-            // Only copy files that resolve inside the projects root: paths in
-            // transcripts are arbitrary strings and must not let a dump
-            // exfiltrate unrelated files (e.g. /etc/passwd, ~/.ssh).
-            if options.copy_media && media_ref.exists && media_ref.within_cursor {
+            // Copy every attachment that still exists — files inside the
+            // projects root AND external workspace `@file`s the user attached
+            // (same capture rule as the backup). References are extracted
+            // from USER messages only, so incidental paths in assistant/tool
+            // output (code, shell logs) never trigger a copy.
+            if options.copy_media && media_ref.exists {
                 if let Some((rel, sha)) = copied_paths.get(&media_ref.path) {
                     entry["copied_to"] = json!(rel);
                     entry["sha256"] = json!(sha);
@@ -79,12 +82,31 @@ pub fn finalize(
         for name in ["train.jsonl", "val.jsonl"] {
             let p = out_dir.join(sub).join(name);
             if p.is_file() {
-                let lines = fs::read_to_string(&p)
-                    .map(|c| c.lines().count())
-                    .unwrap_or(0);
-                file_counts.insert(format!("{sub}/{name}"), json!(lines));
+                let content = fs::read_to_string(&p).unwrap_or_default();
+                file_counts.insert(format!("{sub}/{name}"), json!(content.lines().count()));
+                super::secrets::scan(&content, &mut summary.secrets_detected);
             }
         }
+    }
+    // cpt_txt files too.
+    if let Ok(entries) = fs::read_dir(out_dir.join("cpt_txt")) {
+        for e in entries.flatten() {
+            if let Ok(c) = fs::read_to_string(e.path()) {
+                super::secrets::scan(&c, &mut summary.secrets_detected);
+            }
+        }
+    }
+    if !summary.secrets_detected.is_empty() {
+        let total: usize = summary.secrets_detected.values().sum();
+        summary.warnings.push(format!(
+            "{total} possible secret(s) detected in exported text ({}). Review before sharing, or re-export with secret redaction.",
+            summary
+                .secrets_detected
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     let manifest = json!({
@@ -123,6 +145,7 @@ pub fn finalize(
             "clean_assistant": options.clean_assistant,
             "final_response_only": options.final_response_only,
             "max_record_chars": options.max_record_chars,
+            "redact_secrets": options.redact_secrets,
         },
         "sessions": prepared.iter().map(|p| { let s = &p.session; json!({
             "id": s.meta.id,
@@ -137,6 +160,7 @@ pub fn finalize(
             "source_path": s.meta.path.display().to_string(),
         })}).collect::<Vec<_>>(),
         "file_line_counts": file_counts,
+        "secrets_detected": summary.secrets_detected,
         "media": media_entries,
         "warnings": summary.warnings,
     });
@@ -316,14 +340,31 @@ fn write_dataset_card(
     }
     if options.max_record_chars > 0 {
         card.push_str(&format!(
-            "- Sessions longer than {} characters were split at turn boundaries\n  \
-             (see `metadata.chunk`/`metadata.chunks`).\n",
+            "- Sessions longer than {} characters (UTF-8 chars, not bytes/tokens — roughly\n  \
+             chars/4 ≈ tokens) were split at turn boundaries (see `metadata.chunk`/`metadata.chunks`).\n  \
+             A SINGLE turn larger than the limit cannot be split and is kept whole, flagged with\n  \
+             `metadata.oversize: true` so you can filter or truncate it knowingly.\n",
             options.max_record_chars
         ));
     }
+    if options.val_fraction > 0.0 {
+        card.push_str(&format!(
+            "- Validation split: {:.0}% of SESSIONS (whole sessions, no turn leakage between\n  \
+             splits). Sessions vary a lot in size, so the char/token ratio of the split can\n  \
+             differ from the session ratio — check `file_line_counts` in `manifest.json`.\n",
+            options.val_fraction * 100.0
+        ));
+    }
+    if options.redact_secrets {
+        card.push_str(
+            "- Detected secrets (API keys, tokens, private keys) were replaced with\n  \
+             `[REDACTED_…]` markers.\n",
+        );
+    }
     card.push_str(
         "- PRIVACY: transcripts can embed file contents, paths, shell output and secrets that\n  \
-         appeared during your sessions. Review before sharing or publishing this dataset.\n",
+         appeared during your sessions. `manifest.json` reports `secrets_detected` (pattern-based,\n  \
+         not exhaustive). Review before sharing or publishing this dataset.\n",
     );
     card.push_str(
         "- Images/videos/audio referenced in sessions are listed in `manifest.json` and, when\n  \

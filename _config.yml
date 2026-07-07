@@ -1,0 +1,31 @@
+# Jekyll configuration for the GitHub Pages docs site.
+# README.md becomes the site index; docs/*.md render as pages with
+# .md links rewritten to .html (jekyll-relative-links).
+
+title: CursorDump
+description: >-
+  Explore Cursor agent sessions, export SFT/CPT training datasets,
+  and make complete Cursor-independent backups.
+theme: jekyll-theme-cayman
+
+plugins:
+  - jekyll-relative-links
+
+relative_links:
+  enabled: true
+  collections: false
+
+include:
+  - README.md
+  - docs
+
+exclude:
+  - target
+  - src
+  - tests
+  - terminals
+  - Cargo.toml
+  - Cargo.lock
+  - install.sh
+  - llms-full.txt
+  - vendor

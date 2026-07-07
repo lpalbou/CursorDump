@@ -110,10 +110,15 @@ pub fn extract_refs_from_text(text: &str, cursor_projects_root: &Path) -> Vec<Me
             continue;
         }
         let exists = path.is_file();
+        // Canonicalize BOTH sides so a symlink component in the boundary can't
+        // make the containment check fail open.
+        let boundary_canon = cursor_projects_root
+            .canonicalize()
+            .unwrap_or_else(|_| cursor_projects_root.to_path_buf());
         let within_cursor = exists
             && path
                 .canonicalize()
-                .map(|c| c.starts_with(cursor_projects_root))
+                .map(|c| c.starts_with(&boundary_canon))
                 .unwrap_or(false);
         refs.push(MediaRef {
             kind: classify(&path),

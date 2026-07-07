@@ -3,8 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::response::IntoResponse;
-
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -14,7 +12,7 @@ use serde_json::{json, Value};
 use crate::backup::{self, BackupOptions};
 use crate::export::{self, clean, ExportOptions, SubagentMode, ThinkingMode, UserContent};
 use crate::model::{Block, Role, SessionMeta};
-use crate::{parser, scanner, search};
+use crate::{parser, scanner};
 
 use super::{MediaItem, MsgEntry, SessionFacet, SharedState};
 
@@ -279,11 +277,43 @@ pub async fn session(
 /// The resolved path MUST canonicalize inside the scanned root or the cursor
 /// projects boundary — this endpoint can never serve arbitrary files.
 fn resolve_media_path(state: &SharedState, requested: &Path) -> Option<PathBuf> {
-    let root = state.root.canonicalize().ok()?;
-    let boundary = crate::export::media_boundary(&state.cursor_root);
+    resolve_media_path_ctx(&MediaCtx::new(state), requested)
+}
+
+/// Precomputed resolution context so bulk callers (the finder maps hundreds of
+/// results) don't re-snapshot projects and re-canonicalize roots per item.
+struct MediaCtx {
+    /// Canonicalized scan root (None if it doesn't exist).
+    root: Option<PathBuf>,
+    /// Original (non-canonical) scan root, used for slug re-rooting.
+    scan_root: PathBuf,
+    boundary: PathBuf,
+    slugs: Vec<String>,
+    index: std::sync::Arc<Vec<MsgEntry>>,
+}
+
+impl MediaCtx {
+    fn new(state: &SharedState) -> Self {
+        let boundary = crate::export::media_boundary(&state.cursor_root);
+        Self {
+            root: state.root.canonicalize().ok(),
+            scan_root: state.root.clone(),
+            boundary: boundary.canonicalize().unwrap_or(boundary),
+            slugs: state
+                .projects_snapshot()
+                .iter()
+                .map(|p| p.slug.clone())
+                .collect(),
+            index: message_index(state),
+        }
+    }
+}
+
+fn resolve_media_path_ctx(ctx: &MediaCtx, requested: &Path) -> Option<PathBuf> {
+    let root = ctx.root.as_ref()?;
     let within = |p: &Path| -> Option<PathBuf> {
         let c = p.canonicalize().ok()?;
-        (c.starts_with(&root) || c.starts_with(&boundary)).then_some(c)
+        (c.starts_with(root) || c.starts_with(&ctx.boundary)).then_some(c)
     };
     // Case 1: original path inside an allowed boundary (cursor assets/uploads).
     if requested.is_file() {
@@ -292,11 +322,11 @@ fn resolve_media_path(state: &SharedState, requested: &Path) -> Option<PathBuf> 
         }
     }
     // Case 1b: the original path still exists at its real workspace location
-    // (a user `@file` reference). This is a LOCAL, read-only, loopback-only,
-    // Host-guarded tool serving files the user's OWN sessions referenced, and
-    // only media-classified extensions (gated in the `media` handler). Serving
-    // the user their own referenced file is acceptable here.
-    if requested.is_file() {
+    // (a user `@file` reference outside ~/.cursor). Only serve it if some
+    // indexed message ACTUALLY references this exact path — this bounds the
+    // endpoint to attachments the user's own sessions mention, so it can never
+    // be used to read arbitrary media-extension files elsewhere on disk.
+    if requested.is_file() && path_is_referenced(ctx, requested) {
         if let Ok(c) = requested.canonicalize() {
             return Some(c);
         }
@@ -304,12 +334,11 @@ fn resolve_media_path(state: &SharedState, requested: &Path) -> Option<PathBuf> 
     // Case 2: re-root cursor-internal paths onto the scanned root via slug
     // (browsing a backup: /…/.cursor/projects/<slug>/assets/x → <root>/<slug>/assets/x).
     let req = requested.to_string_lossy();
-    let projects = state.projects_snapshot();
-    for p in &projects {
-        let needle = format!("/{}/", p.slug);
+    for slug in &ctx.slugs {
+        let needle = format!("/{slug}/");
         if let Some(idx) = req.find(&needle) {
             let rest = &req[idx + needle.len()..];
-            let candidate = state.root.join(&p.slug).join(rest);
+            let candidate = ctx.scan_root.join(slug).join(rest);
             if candidate.is_file() {
                 if let Some(c) = within(&candidate) {
                     return Some(c);
@@ -331,6 +360,14 @@ fn resolve_media_path(state: &SharedState, requested: &Path) -> Option<PathBuf> 
         }
     }
     None
+}
+
+/// True if some indexed message references this exact absolute path as media.
+fn path_is_referenced(ctx: &MediaCtx, path: &Path) -> bool {
+    let p = path.display().to_string();
+    ctx.index
+        .iter()
+        .any(|e| e.media.iter().any(|m| m.path == p))
 }
 
 fn mime_for(path: &Path) -> &'static str {
@@ -393,24 +430,32 @@ pub async fn media(
     }
     let resolved = resolve_media_path(&state, &requested)
         .ok_or((StatusCode::NOT_FOUND, "attachment not found".into()))?;
-    let bytes = tokio::task::spawn_blocking(move || std::fs::read(&resolved))
+    // Stream instead of buffering: session videos can be hundreds of MB and a
+    // few parallel <video> tags must not hold whole files in memory.
+    let file = tokio::fs::File::open(&resolved)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    let len = file
+        .metadata()
+        .await
+        .ok()
+        .map(|m| m.len().to_string())
+        .unwrap_or_default();
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
     let mime = mime_for(&requested);
-    Ok((
-        [
-            (axum::http::header::CONTENT_TYPE, mime.to_string()),
-            // Inline display, but never HTML execution (mime above is text/plain
-            // for markup) — plus a conservative CSP for SVG.
-            (
-                axum::http::header::CONTENT_SECURITY_POLICY,
-                "default-src 'none'; style-src 'unsafe-inline'".to_string(),
-            ),
-        ],
-        bytes,
-    )
-        .into_response())
+    let mut resp = axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, mime)
+        // Inline display, but never HTML execution (mime above is text/plain
+        // for markup) — plus a conservative CSP for SVG.
+        .header(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; style-src 'unsafe-inline'",
+        );
+    if !len.is_empty() {
+        resp = resp.header(axum::http::header::CONTENT_LENGTH, len);
+    }
+    resp.body(body)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 // -------------------------------------------------------------- unified find
@@ -426,6 +471,12 @@ fn message_index(state: &SharedState) -> std::sync::Arc<Vec<MsgEntry>> {
     if let Some(idx) = state.cached_index() {
         return idx;
     }
+    // Serialize builds: a second caller waits here, then finds the cache warm.
+    let _build = state.index_build.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(idx) = state.cached_index() {
+        return idx;
+    }
+    let gen = state.current_index_gen();
     let boundary = crate::export::media_boundary(&state.cursor_root);
     let projects = state.projects_snapshot();
     let mut entries: Vec<MsgEntry> = Vec::new();
@@ -493,7 +544,8 @@ fn message_index(state: &SharedState) -> std::sync::Arc<Vec<MsgEntry>> {
         }
     }
     let arc = std::sync::Arc::new(entries);
-    state.store_index(arc.clone());
+    // Only cache if no rescan invalidated this build while it ran.
+    state.store_index_if_current(arc.clone(), gen);
     arc
 }
 
@@ -567,10 +619,17 @@ pub async fn find(
             .collect();
         matched.sort_by(|a, b| b.modified_unix.cmp(&a.modified_unix));
         let total = matched.len();
+        // One snapshot + one canonicalization for the whole result page.
+        let ctx = MediaCtx::new(&state);
+        let names: std::collections::HashMap<String, String> = state
+            .projects_snapshot()
+            .into_iter()
+            .map(|p| (p.slug, p.display_name))
+            .collect();
         let display_map = |e: &MsgEntry| {
             json!({
                 "project": e.project_slug,
-                "project_name": display_name(&state, &e.project_slug),
+                "project_name": names.get(&e.project_slug).cloned().unwrap_or_else(|| e.project_slug.clone()),
                 "session_path": e.session_path,
                 "session_title": e.session_title,
                 "is_subagent": e.is_subagent,
@@ -580,7 +639,7 @@ pub async fn find(
                 "tools": e.tools,
                 "media": e.media.iter().map(|m| json!({
                     "name": m.name, "kind": m.kind, "path": m.path,
-                    "available": resolve_media_path(&state, &PathBuf::from(&m.path)).is_some(),
+                    "available": resolve_media_path_ctx(&ctx, &PathBuf::from(&m.path)).is_some(),
                 })).collect::<Vec<_>>(),
             })
         };
@@ -599,52 +658,6 @@ pub async fn find(
         "total": total,
         "truncated": total > FIND_CAP,
     })))
-}
-
-fn display_name(state: &SharedState, slug: &str) -> String {
-    state
-        .projects_snapshot()
-        .iter()
-        .find(|p| p.slug == slug)
-        .map(|p| p.display_name.clone())
-        .unwrap_or_else(|| slug.to_string())
-}
-
-// ------------------------------------------------------------------- search
-
-#[derive(Deserialize)]
-pub struct SearchBody {
-    pub query: String,
-}
-
-pub async fn search(
-    State(state): State<SharedState>,
-    Json(body): Json<SearchBody>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let query = body.query.trim().to_string();
-    if query.len() < 2 {
-        return Err((StatusCode::BAD_REQUEST, "query too short".into()));
-    }
-    let projects = state.projects_snapshot();
-    let hits = tokio::task::spawn_blocking(move || {
-        let (tx, rx) = std::sync::mpsc::channel();
-        search::run_search(&projects, &query, tx, search::SearchCancel::new(), || {});
-        let mut hits = Vec::new();
-        while let Ok(ev) = rx.try_recv() {
-            if let search::SearchEvent::Hit(h) = ev {
-                hits.push(json!({
-                    "project_slug": h.project_slug,
-                    "session": session_json(&h.session),
-                    "record_index": h.record_index,
-                    "snippet": h.snippet,
-                }));
-            }
-        }
-        hits
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(json!({ "hits": hits })))
 }
 
 // ------------------------------------------------------------------- export
@@ -676,6 +689,7 @@ pub struct ExportOptionsBody {
     pub val_fraction: Option<f32>,
     pub with_metadata: Option<bool>,
     pub max_record_chars: Option<usize>,
+    pub redact_secrets: Option<bool>,
 }
 
 impl ExportOptionsBody {
@@ -697,7 +711,8 @@ impl ExportOptionsBody {
             min_turns,
             val_fraction,
             with_metadata,
-            max_record_chars
+            max_record_chars,
+            redact_secrets
         );
         if let Some(u) = self.user_content.as_deref() {
             o.user_content = if u == "raw" {

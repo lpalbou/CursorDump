@@ -89,6 +89,15 @@ fn write_split(
                     md["think_chars"] =
                         json!(chunk.iter().map(|t| t.thinking.len()).sum::<usize>());
                     md["answer_chars"] = json!(chunk.iter().map(|t| t.answer.len()).sum::<usize>());
+                    // A single turn larger than max_record_chars cannot be
+                    // split at a turn boundary; flag it so downstream tooling
+                    // can filter or truncate knowingly.
+                    if options.max_record_chars > 0 {
+                        let sz: usize = chunk.iter().map(|t| t.chars()).sum();
+                        if sz > options.max_record_chars {
+                            md["oversize"] = json!(true);
+                        }
+                    }
                     record["metadata"] = md;
                 }
                 let line =

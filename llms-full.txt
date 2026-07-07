@@ -1,0 +1,1547 @@
+# CursorDump
+
+> A local Rust tool that explores Cursor IDE agent sessions, exports them as
+> SFT/CPT training datasets (Unsloth, ForgeLLM, HuggingFace `datasets`), and
+> makes complete Cursor-independent backups. Read-only on `~/.cursor`;
+> loopback-only web UI plus a headless CLI.
+
+This file aggregates the core documentation corpus for LLM/tool ingestion.
+The canonical documents live in the repository; see `llms.txt` for the
+concise index.
+
+## Document Index
+
+- README.md
+- docs/getting-started.md
+- docs/exporting.md
+- docs/backup.md
+- docs/api.md
+- docs/architecture.md
+- docs/knowledge-base.md
+- docs/faq.md
+- docs/troubleshooting.md
+- CONTRIBUTING.md
+- SECURITY.md
+
+---
+
+## README.md
+
+# CursorDump
+
+Explore your Cursor IDE agent sessions, export them as training-ready datasets
+for supervised fine-tuning (SFT) and continued pre-training (CPT), and make
+complete, Cursor-independent backups of your agent history.
+
+![CursorDump](docs/screenshot.png)
+
+CursorDump is a single Rust binary that serves a local web UI (and a headless
+CLI) over the transcripts Cursor stores under `~/.cursor/projects/`. Access to
+that data is strictly read-only: running agent sessions are never altered,
+locked, or disturbed.
+
+## Capabilities
+
+- **Browse** every Cursor project on your machine, with per-project session
+  lists. Subagent transcripts nest under the master session that spawned them.
+- **Explore** sessions message by message: user queries, assistant answers,
+  collapsible thinking traces, expandable tool calls, and inline attachments
+  (images, audio/video players, file chips).
+- **Find** messages with one unified finder: keyword + attachment media type +
+  tool used, combined. Results are the exact messages that match, with image
+  thumbnails; click to jump to the message in its session.
+- **Export** any selection of sessions as SFT (ChatML, ShareGPT) and CPT
+  (JSONL corpus, plain-text files) datasets, directly usable by
+  [Unsloth](https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/datasets-guide)
+  (including Unsloth Studio), [ForgeLLM](https://github.com/lpalbou/ForgeLLM),
+  and anything that reads HuggingFace `datasets`. Thinking traces, tool calls,
+  and subagent delegations are handled with configurable, training-aware
+  policies, and every export scans its output for leaked credentials
+  (optional redaction).
+- **Back up** all (or selected) projects verbatim and incrementally — every
+  transcript, subagent, asset, upload, and canvas — with per-transcript
+  sha256 integrity records. The backup bundles the `cursordump` binary, so
+  you can re-explore it even on a machine without Cursor.
+
+## Installation
+
+**Prebuilt binary (macOS arm64/x86_64, Linux x86_64/arm64)** — no Rust
+toolchain needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lpalbou/cursordump/main/install.sh | sh
+```
+
+The script downloads the latest
+[GitHub release](https://github.com/lpalbou/cursordump/releases), verifies
+its sha256 (mandatory), and installs to `~/.local/bin` (override with
+`CURSORDUMP_BIN_DIR`; pin a version with `CURSORDUMP_VERSION=vX.Y.Z`). Linux
+binaries are static (musl) and run on any distribution. You can also
+download an archive from the releases page manually.
+
+**From source** — requires Rust stable (1.75+):
+
+```bash
+git clone https://github.com/lpalbou/cursordump
+cd cursordump
+cargo install --path .        # or: cargo run --release
+```
+
+## Quick start
+
+```bash
+cursordump                     # opens http://127.0.0.1:7070 in your browser
+cursordump --port 7075         # custom port
+cursordump --no-open           # print the URL instead of opening a browser
+cursordump /path/to/projects   # explore a custom root (e.g. a backup)
+```
+
+Then, in the UI: pick a project (left), tick the sessions you want (middle),
+and press **⬇ Export…** or **🗄 Backup…** (top bar). See
+[docs/getting-started.md](docs/getting-started.md) for a full first run.
+
+## Headless CLI
+
+Everything works without the UI:
+
+```bash
+# Export a project as every dataset format
+cursordump export --project <project-slug> --out ./my-dataset --all-formats
+
+# Back up all projects (incremental on re-run)
+cursordump backup --out ~/Documents/cursordump-backup
+
+# Check a backup against its integrity manifest
+cursordump verify ~/Documents/cursordump-backup
+
+# Restore into ~/.cursor/projects (copies missing files only; --dry-run first)
+cursordump restore --from ~/Documents/cursordump-backup --dry-run
+```
+
+Run `cursordump --help` for all flags, or see [docs/api.md](docs/api.md) for
+the complete CLI and dataset reference.
+
+## What an export looks like
+
+```text
+my-dataset/
+├── sft_chatml/train.jsonl      # {"messages":[{"role","content"}]}   → Unsloth / HF
+├── sft_sharegpt/train.jsonl    # {"conversations":[{"from","value"}]}
+├── cpt/train.jsonl             # {"text": ...}                       → Unsloth CPT / HF
+├── cpt_txt/*.txt               # one plain-text file per session     → ForgeLLM dataset/
+├── media/                      # copied attachments (images etc.)
+├── manifest.json               # provenance, options, media index, secret scan
+└── README.md                   # generated dataset card
+```
+
+Each format lives in its own subdirectory so schemas never mix:
+
+```python
+from datasets import load_dataset
+sft = load_dataset("json", data_dir="my-dataset/sft_chatml")
+cpt = load_dataset("json", data_dir="my-dataset/cpt")
+```
+
+[docs/exporting.md](docs/exporting.md) covers every option (thinking modes,
+subagent handling, cleaning, chunking, validation splits) and the exact steps
+for Unsloth Studio and ForgeLLM.
+
+## Privacy
+
+Transcripts routinely contain file contents, shell output, paths, and
+potentially secrets from your sessions. Every export scans its written files
+for common credential shapes and reports `secrets_detected` in the manifest;
+`--redact-secrets` replaces them with `[REDACTED_…]` markers. Detection is
+pattern-based and not exhaustive — review a dump before sharing or publishing
+it. See [docs/faq.md](docs/faq.md#privacy) for details.
+
+## Security posture
+
+The server binds `127.0.0.1` only, validates the `Host` header (DNS-rebinding
+defense), and requires a random per-run token on every API request. Media
+serving is restricted to files actually referenced by your transcripts.
+Exports and backups refuse to write inside `~/.cursor`. See
+[docs/architecture.md](docs/architecture.md#security-model) and
+[SECURITY.md](SECURITY.md).
+
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/getting-started.md](docs/getting-started.md) | Install, first run, the UI tour, your first export |
+| [docs/exporting.md](docs/exporting.md) | Dataset formats, export options, Unsloth Studio, ForgeLLM |
+| [docs/backup.md](docs/backup.md) | Full backups, incremental runs, integrity, restore |
+| [docs/api.md](docs/api.md) | CLI reference, JSON API, dataset schemas |
+| [docs/architecture.md](docs/architecture.md) | System design, data flow, safety invariants |
+| [docs/knowledge-base.md](docs/knowledge-base.md) | The Cursor transcript format and dataset-quality rules |
+| [docs/faq.md](docs/faq.md) | Common questions and limitations |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Symptoms, diagnostics, fixes |
+
+The full index is at [docs/README.md](docs/README.md). Release history lives
+in [CHANGELOG.md](CHANGELOG.md).
+
+## Contributing
+
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+Run the CI gate locally before submitting:
+
+```bash
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+```
+
+## Affiliation and responsible use
+
+CursorDump is an independent open-source project, not affiliated with or
+endorsed by Cursor (Anysphere). It reads only data files that Cursor stores
+on your own machine, never modifies them, and redistributes no Cursor code
+or assets. Cursor's terms assign ownership of your inputs and AI outputs to
+you; note that datasets derived from model outputs may additionally be
+subject to the upstream model providers' terms — review them before
+training on or publishing an export.
+
+## License
+
+MIT — Copyright (c) 2026 Laurent-Philippe Albou
+<[contact@abstractframework.ai](mailto:contact@abstractframework.ai)>.
+See [LICENSE](LICENSE).
+
+---
+
+## docs/getting-started.md
+
+# Getting Started
+
+This guide takes you from a clean machine to your first exported dataset.
+For an overview of what CursorDump does, see the [README](../README.md).
+
+## Prerequisites
+
+A machine where the Cursor IDE has been used (transcripts live under
+`~/.cursor/projects/`). Without Cursor data you can still run CursorDump
+against a backup folder or a custom root.
+
+## Install
+
+**Prebuilt binary** (macOS arm64/x86_64, Linux x86_64/arm64 — no Rust
+toolchain needed):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lpalbou/cursordump/main/install.sh | sh
+```
+
+The script verifies the release's sha256 and installs to `~/.local/bin`
+(override with `CURSORDUMP_BIN_DIR`, pin a version with
+`CURSORDUMP_VERSION=vX.Y.Z`). Linux binaries are static (musl) and run on
+any distribution. Archives are also downloadable from the
+[releases page](https://github.com/lpalbou/cursordump/releases).
+
+**From source** (Rust stable, MSRV 1.75 — install via
+[rustup](https://rustup.rs)):
+
+```bash
+git clone https://github.com/lpalbou/cursordump
+cd cursordump
+cargo install --path .
+```
+
+## Launch
+
+```bash
+cursordump
+```
+
+The server starts on `http://127.0.0.1:7070` and opens your browser with a
+per-run access URL. Variants:
+
+```bash
+cursordump --port 7075          # custom port
+cursordump --no-open            # print the URL, don't open a browser
+cursordump /path/to/projects    # explore a custom root (e.g. a backup)
+```
+
+CursorDump reads your Cursor data strictly read-only: running agent sessions
+are never modified, locked, or disturbed.
+
+## The UI at a glance
+
+The page has three panels plus a top bar:
+
+- **Top bar** — the unified finder (keyword, media chips, tools dropdown),
+  the live "N selected" count, **⬇ Export…**, **🗄 Backup…**, and a
+  "🔒 read-only" reminder.
+- **Projects** (left) — every project, most recently active first. Each row
+  shows two chips: blue = main sessions, amber = subagent transcripts. Click
+  a project to open it; click it again to deselect.
+- **Sessions** (middle) — the selected project's sessions, each with an
+  export checkbox. Subagent transcripts nest under the master session that
+  spawned them; click "▸ N subagents" to expand.
+- **Viewer / results** (right) — the open session's messages, or your finder
+  results.
+
+Inside a session: user and assistant messages are color-coded, assistant
+reasoning sits behind a violet **💭 thinking** toggle, each tool call is a
+chip you click to expand into its full input, and attachments render inline
+(images with a click-to-zoom lightbox, audio/video players, file chips).
+
+## Finding messages
+
+The top bar is one combined finder. You can mix:
+
+- a **keyword** (press `/` to focus the box),
+- **media chips** — 🖼 image, 🔊 audio, 🎬 video, 📄 document, 📎 readable,
+- a **Tools** dropdown (filter by tool the assistant used),
+- an optional **project scope** (set by selecting a project).
+
+Results are the exact messages matching every active criterion — for
+example, toggle 🖼 image and you see only messages that actually carry an
+image, shown as thumbnails. Results group by session; click one to jump to
+that message. **Clear all** resets the finder.
+
+## Your first export
+
+1. Tick the checkbox on one or more sessions — or **Select all** for the
+   whole project. The top bar shows the selection count.
+2. Click **⬇ Export…** and pick a preset (Chat SFT, Agentic SFT, CPT corpus,
+   or Everything). Presets set sensible option combinations; you can adjust
+   anything.
+3. Confirm the output folder (prefilled under `~/Downloads/`, must be
+   outside `~/.cursor`) and press **⬇ Export**. Results — record counts,
+   media copied, and any warnings (including detected secrets) — appear in
+   the dialog.
+
+The output folder contains ready-to-train JSONL files, a `manifest.json`,
+and a generated dataset card. [exporting.md](exporting.md) explains every
+format and option, and shows how to load the data in Unsloth Studio and
+ForgeLLM.
+
+The same export works headlessly:
+
+```bash
+cursordump export --project <project-slug> --out ./my-dataset --all-formats
+```
+
+See [api.md](api.md) for the full CLI reference.
+
+## Backing up your sessions
+
+Cursor can clear old agent data. A backup is a verbatim copy of everything —
+distinct from a dataset export:
+
+```bash
+cursordump backup --out ~/Documents/cursordump-backup
+```
+
+or **🗄 Backup…** in the UI. Re-running into the same folder is incremental;
+`cursordump verify <backup>` checks integrity and
+`cursordump restore --from <backup>` copies it back. See
+[backup.md](backup.md) for details.
+
+## Next steps
+
+- [exporting.md](exporting.md) — take control of the training data.
+- [architecture.md](architecture.md) — how the system works.
+- [troubleshooting.md](troubleshooting.md) — if the first run didn't go as
+  planned.
+
+---
+
+## docs/exporting.md
+
+# Exporting Datasets
+
+This page covers everything about turning Cursor sessions into training
+data: the output layout, every export option, and step-by-step usage with
+Unsloth Studio and ForgeLLM. For a first export, see
+[getting-started.md](getting-started.md); for the rationale behind these
+policies, see [knowledge-base.md](knowledge-base.md).
+
+## Output layout
+
+```text
+my-dataset/
+├── sft_chatml/train.jsonl      # {"messages":[{"role","content"}]}   → Unsloth / HF
+├── sft_sharegpt/train.jsonl    # {"conversations":[{"from","value"}]}
+├── cpt/train.jsonl             # {"text": ...}                       → Unsloth CPT / HF
+├── cpt_txt/*.txt               # one plain-text file per session     → ForgeLLM dataset/
+├── media/                      # copied attachments (images etc.)
+├── manifest.json               # provenance, options, media index, secret scan
+└── README.md                   # generated dataset card
+```
+
+Each format lives in its own subdirectory so schemas never mix, and all
+records in one file share the same top-level keys — both requirements of
+HuggingFace `load_dataset("json", data_dir=…)`:
+
+```python
+from datasets import load_dataset
+sft = load_dataset("json", data_dir="my-dataset/sft_chatml")
+cpt = load_dataset("json", data_dir="my-dataset/cpt")
+```
+
+With a validation split > 0, `val.jsonl` appears next to each `train.jsonl`.
+Splits are made at the session level (whole sessions, no turn leakage
+between splits).
+
+## CLI
+
+```bash
+cursordump export --project <project-slug> --out <dir> [options]
+
+# Options:
+#   --all-formats                        sft_chatml + sft_sharegpt + cpt + cpt_txt
+#   --subagent-mode inline|separate|drop (default inline)
+#   --include-subagents                  shorthand for --subagent-mode separate
+#   --thinking tagged|verbatim|strip     (default tagged)
+#   --val <fraction>                     validation split, e.g. 0.1
+#   --min-turns N                        skip sessions with fewer trainable turns
+#   --tool-calls  --raw-user  --no-clean --no-media  --no-metadata  --final-only
+#   --redact-secrets                     replace detected credentials with [REDACTED_…]
+```
+
+## Options reference
+
+| Option | Default | Notes |
+|---|---|---|
+| Thinking | capture as `<think>…</think>` | reasoning-model convention; also `verbatim` or `strip` |
+| User content | clean query | extracts `<user_query>`; "raw" keeps injected system context |
+| Clean assistant | on | strips IDE `[label](uuid)` chat links; trims dangling "I'll now…" intents |
+| Final response only | off | keeps just the last assistant message per turn |
+| Tool calls | excluded | can be rendered as ```tool_call``` blocks; transcripts hold calls but **no results** |
+| Subagents | inline | `inline` foreground results into master, `separate` records, or `drop` |
+| Copy media | on | copies attachments referenced by user messages: files inside `~/.cursor/projects` and external workspace `@file`s that still exist |
+| Inline readable attachments | off | adds txt/md/csv/… contents as extra CPT records |
+| Min turns | 1 | skips empty/degenerate sessions |
+| Validation split | 0 | fraction of sessions routed to `val.jsonl` |
+| Max record size | 100 000 chars | splits long sessions at turn boundaries (0 = unlimited) |
+| Metadata column | on | project/session/timestamps/chunk/task-links per record; ignored by trainers |
+| Redact secrets | off | replaces detected credentials with `[REDACTED_…]` markers |
+
+## Thinking (reasoning traces)
+
+Cursor records the assistant's summarized reasoning alongside its answers.
+You choose how it appears in the dataset:
+
+- **Capture as `<think>…</think>` (default)** — reasoning is wrapped in
+  `<think>` tags before the answer, the convention used by reasoning models
+  (DeepSeek-R1, Qwen3). Use a reasoning-capable base model and chat template
+  when training on this.
+- **Keep verbatim inline** — the original text with thinking left in place
+  (natural for CPT corpora).
+- **Strip** — answer only, for a clean non-reasoning assistant.
+
+Detection separates bold-header reasoning blocks and headerless first-person
+planning prose from user-facing answers. It is deliberately conservative:
+structured content (code, lists, tables) is never classified as thinking.
+These traces are Cursor's *summarized* reasoning — a distillation, not raw
+chain-of-thought — and the generated dataset card states this.
+
+## User content
+
+- **Clean query (default)** — just what you typed (the `<user_query>` part);
+  harness-injected notifications (subagent results, background-task
+  messages) are excluded.
+- **Raw records** — everything, including injected context and rules.
+  Rarely what you want for training.
+
+## Assistant cleaning
+
+On by default:
+
+- IDE-only `[label](uuid)` chat links are rewritten to plain text (the UUIDs
+  are dead outside Cursor).
+- Dangling "I'll now run the tests." intents at the end of a turn are
+  trimmed when tool calls were stripped (otherwise the model learns to
+  announce and stop).
+
+**Tool calls** are excluded by default: transcripts contain tool *calls* but
+never tool *results*, so rendering calls without results teaches call syntax
+against invisible outputs. Enable `--tool-calls` only when you specifically
+want that syntax in the data.
+
+## Subagents (Task tool)
+
+When the agent delegates work to subagents, choose how that appears:
+
+- **Inline (default)** — a foreground subagent's final answer is spliced
+  into the master conversation as the Task tool's result, preserving the
+  delegate → receive → synthesize loop. Background tasks are marked
+  `spawned_in_background` with no result (the master continued without
+  waiting). Resumed tasks are marked `resumed` without repeating output that
+  is already present.
+- **Separate** — every subagent becomes its own conversation record, tagged
+  `metadata.user_kind: "agent_brief"` (useful for training worker agents).
+  Self-forked sessions that exist as both a main and a subagent transcript
+  are exported once.
+- **Drop** — subagents excluded.
+
+Task calls are linked to their subagent transcripts by matching the Task
+prompt to the subagent's first user query; per-record metadata carries the
+linkage (`task_prompt_hash`, `child_transcript`, match kind).
+
+## Record length and chunking
+
+Long sessions are split into multiple records at turn boundaries (default
+100 000 UTF-8 characters, roughly 25k tokens — chars/4 is a reasonable token
+estimate). `metadata.chunk` / `metadata.chunks` identify the pieces. A
+single turn larger than the limit cannot be split and is kept whole with
+`metadata.oversize: true`, so you can filter or truncate it knowingly.
+
+## Secret scanning and redaction
+
+Every export scans the final written files for common credential shapes
+(HuggingFace/OpenAI/GitHub/AWS/Google/Slack tokens, bearer tokens, private
+keys) and reports counts in `manifest.json` under `secrets_detected`, in the
+dataset card, and as a warning in the CLI/UI.
+
+Redaction is opt-in: `--redact-secrets` (CLI) or *redact secrets* (UI)
+replaces detected secrets with `[REDACTED_…]` markers; a redacted export
+reports zero remaining detections. Detection is pattern-based and not
+exhaustive — review a dump before publishing it.
+
+## Using the dataset in Unsloth Studio
+
+[Unsloth Studio](https://unsloth.ai/docs/new/studio) is a local no-code UI
+for training models.
+
+1. Launch Studio (`unsloth studio` after installing).
+2. Import your dataset:
+   - **SFT** — point it at `my-dataset/sft_chatml` (ChatML `messages`);
+     Studio applies the target model's chat template automatically. For
+     ShareGPT exports, `standardize_sharegpt` handles the conversion.
+   - **CPT** — point it at `my-dataset/cpt`; the `text` column is exactly
+     what continued pre-training expects (no template, no EOS baked in;
+     the trainer adds the model's EOS per sample).
+3. Pick a base or instruct model, choose LoRA/full fine-tune, and train.
+4. If you exported thinking as `<think>` tags, use a reasoning-capable base
+   model and its reasoning chat template.
+
+In code (Unsloth notebooks) the same data works directly:
+
+```python
+from datasets import load_dataset
+ds = load_dataset("json", data_dir="my-dataset/sft_chatml", split="train")
+# ds[i]["messages"] is a ChatML conversation; apply your tokenizer's
+# chat template, then train with SFTTrainer as in the Unsloth guide.
+```
+
+## Using the dataset in ForgeLLM
+
+[ForgeLLM](https://github.com/lpalbou/ForgeLLM) does continued pre-training
+and fine-tuning with MLX on Apple Silicon.
+
+1. ForgeLLM reads a `dataset/` directory of text files for CPT:
+
+   ```bash
+   cp my-dataset/cpt_txt/*.txt /path/to/forgellm/dataset/
+   ```
+
+   (or point ForgeLLM's dataset path at `my-dataset/cpt_txt`).
+2. Start ForgeLLM (`forgellm start`), open the Training tab, pick a base
+   model, and run continued pre-training on your session corpus.
+3. The `cpt/train.jsonl` and SFT JSONL files are standard HuggingFace shapes
+   that ForgeLLM's data pipeline can consume as it adds instruction
+   fine-tuning support.
+
+The formats are portable HuggingFace conventions, not tool-specific — any
+`datasets`-compatible trainer can use them.
+
+## Quick reference
+
+| I want… | Do this |
+|---|---|
+| Clean chat data to teach answers | Preset **Chat SFT (clean)** |
+| Agentic data with tool use + subagents | Preset **Agentic SFT (tools + subagents)** |
+| A raw corpus for continued pretraining | Preset **CPT corpus** |
+| Reasoning traces in the data | Thinking = **Capture as `<think>`** (default) |
+| No reasoning, answers only | Thinking = **Strip** |
+| Subagent work folded into the master | Subagents = **Inline** (default) |
+| Subagents as their own examples | Subagents = **Separate** |
+| Everything, for later filtering | Preset **Everything** + metadata on |
+| A dataset safe to share | `--redact-secrets`, then review the manifest |
+
+---
+
+## docs/backup.md
+
+# Full Backups
+
+A backup is a verbatim, complete copy of your Cursor projects — every
+transcript, subagent, asset, upload, canvas, terminal, and tool cache — that
+survives independently of Cursor. It is distinct from a
+[dataset export](exporting.md), which transforms transcripts for training.
+
+## Why back up
+
+Cursor can clear old agent data. A backup preserves your full agent history
+in the original layout, with integrity records, and can be explored or
+restored at any time.
+
+## Creating a backup
+
+In the UI: **🗄 Backup…** (top bar) → all projects or the selected one →
+choose a folder outside `~/.cursor` → **Back up**.
+
+From the CLI:
+
+```bash
+cursordump backup --out ~/Documents/cursordump-backup                    # all projects
+cursordump backup --out ~/Documents/cursordump-backup --project <slug>   # subset (repeatable)
+
+# Options:
+#   --skip-runtime      omit regenerable terminals/ and agent-tools/ caches
+#   --no-verify         skip per-transcript sha256 hashing
+#   --no-app            don't bundle the cursordump binary
+#   --no-attachments    don't capture external workspace attachments
+```
+
+## What a backup contains
+
+```text
+cursordump-backup/
+├── projects/<slug>/…           # verbatim mirror of ~/.cursor/projects/<slug>/
+├── attachments/                # external workspace @files referenced by sessions
+├── cursordump                  # the bundled app (self-contained exploration)
+├── cursordump-backup.json      # manifest: projects, sha256 per transcript, attachments
+└── README.md                   # restore and exploration instructions
+```
+
+- **Verbatim mirror** — original layout and modification times preserved;
+  `node_modules/` and `.git/` are always skipped (regenerable, never Cursor
+  data).
+- **External attachments** — workspace `@file` references that live outside
+  `~/.cursor` (and still exist) are copied into `attachments/` with sha256
+  hashes, so they survive workspace changes. Files already deleted cannot be
+  recovered — back up before they are gone.
+- **Integrity** — the manifest records a sha256 for every `.jsonl`
+  transcript (disable with `--no-verify`) and for every captured attachment.
+
+## Incremental behavior
+
+Re-running a backup into the same folder copies only files whose size or
+modification time changed — cheap enough to run on a schedule (cron,
+launchd, or a Cursor hook). Subset re-runs (`--project X`) merge into the
+manifest: records for projects outside the run are preserved. Changed
+external attachments are re-copied and re-hashed.
+
+## Exploring a backup without Cursor
+
+The backup bundles the `cursordump` binary, so it is self-contained:
+
+```bash
+cd ~/Documents/cursordump-backup
+./cursordump projects
+```
+
+This opens the full explorer — sessions, thinking traces, attachments,
+finder, and dataset export — directly on the backup, no Cursor installation
+required. On macOS, a first run may need
+`xattr -d com.apple.quarantine cursordump`. If the bundled binary does not
+match your OS/architecture, build CursorDump from source and run
+`cursordump /path/to/backup/projects`.
+
+Attachment paths inside transcripts are re-rooted automatically: media that
+lived under `~/.cursor/projects/` resolves to the backup's `projects/`
+mirror, and external attachments resolve to the backup's `attachments/`
+copies.
+
+## Verifying a backup
+
+```bash
+cursordump verify ~/Documents/cursordump-backup
+```
+
+Recomputes the sha256 of every transcript and attachment recorded in the
+manifest and reports ok / mismatched / missing counts, exiting non-zero on
+any failure. It also flags *unlisted* transcripts — `.jsonl` files present
+in the backup tree but absent from the manifest, whose integrity is
+therefore unknown. Verification is read-only. Backups made with
+`--no-verify` have no transcript hashes; `verify` reports those entries as
+unhashed.
+
+## Restoring into Cursor
+
+```bash
+cursordump restore --from ~/Documents/cursordump-backup --dry-run   # preview
+cursordump restore --from ~/Documents/cursordump-backup             # restore
+```
+
+Restore is deliberately conservative:
+
+- by default it copies only files **missing** at the destination — existing
+  files are never touched;
+- `--overwrite` additionally replaces destination files whose size or
+  modification time differ from the backup;
+- nothing is ever deleted;
+- `--project <slug>` (repeatable) restores a subset;
+- `--dry-run` prints what would be copied without writing.
+
+Because the backup mirrors the original layout, a manual copy works too:
+
+```bash
+cp -a ~/Documents/cursordump-backup/projects/* ~/.cursor/projects/
+```
+
+Run `cursordump verify` first if you need certainty about integrity.
+
+## See also
+
+- [getting-started.md](getting-started.md) — the UI backup dialog.
+- [api.md](api.md#backup) — CLI flags and the backup manifest schema.
+- [troubleshooting.md](troubleshooting.md) — common backup issues.
+
+---
+
+## docs/api.md
+
+# Reference: CLI, JSON API, and Schemas
+
+The canonical interface surfaces of CursorDump. For task-oriented guides,
+see [exporting.md](exporting.md) and [backup.md](backup.md).
+
+## CLI
+
+```text
+cursordump [--port N] [--no-open] [<projects-root>]     start the web UI (default)
+cursordump export --project <slug> --out <dir> [options]
+cursordump backup --out <dir> [--project <slug>]... [options]
+cursordump verify <backup-dir>
+cursordump restore --from <backup-dir> [options]
+cursordump --help
+```
+
+### Server mode
+
+| Flag | Meaning |
+|---|---|
+| `--port N` | listen port (default 7070); invalid values are rejected |
+| `--no-open` | print the tokenized URL instead of opening a browser |
+| `<projects-root>` | custom root to explore (default `~/.cursor/projects`); use a backup's `projects/` folder to explore a backup |
+
+The server prints `http://127.0.0.1:<port>/?token=<token>`; the token is
+required for all API access (see [JSON API](#json-api)).
+
+### `export`
+
+| Flag | Meaning |
+|---|---|
+| `--project <slug>` | project to export (required) |
+| `--out <dir>` | output directory, must be outside `~/.cursor` (required) |
+| `--all-formats` | write sft_chatml + sft_sharegpt + cpt + cpt_txt |
+| `--subagent-mode inline\|separate\|drop` | subagent handling (default `inline`) |
+| `--include-subagents` | shorthand for `--subagent-mode separate` |
+| `--thinking tagged\|verbatim\|strip` | reasoning-trace handling (default `tagged`) |
+| `--val <fraction>` | validation split by session, e.g. `0.1` |
+| `--min-turns N` | skip sessions with fewer trainable turns |
+| `--tool-calls` | render tool calls as ```tool_call``` blocks |
+| `--raw-user` | keep full raw user records (default: clean `<user_query>`) |
+| `--no-clean` | keep IDE chat links and dangling intents |
+| `--no-media` | don't copy referenced media |
+| `--no-metadata` | omit the per-record `metadata` object |
+| `--final-only` | keep only the last assistant message per turn |
+| `--redact-secrets` | replace detected credentials with `[REDACTED_…]` |
+
+### `backup`
+
+| Flag | Meaning |
+|---|---|
+| `--out <dir>` | backup directory, must be outside `~/.cursor` (required) |
+| `--project <slug>` | restrict to this project; repeatable (default: all) |
+| `--skip-runtime` | omit `terminals/` and `agent-tools/` caches |
+| `--no-verify` | skip per-transcript sha256 hashing |
+| `--no-app` | don't bundle the `cursordump` binary |
+| `--no-attachments` | don't capture external workspace attachments |
+
+### `verify`
+
+```text
+cursordump verify <backup-dir>
+```
+
+Recomputes every transcript and attachment sha256 recorded in
+`cursordump-backup.json` and reports ok / mismatched / missing counts.
+Read-only; exits non-zero if anything fails.
+
+### `restore`
+
+| Flag | Meaning |
+|---|---|
+| `--from <backup-dir>` | CursorDump backup to restore from (required) |
+| `--project <slug>` | restrict to this project; repeatable (default: all in backup) |
+| `--dry-run` | print what would be copied, write nothing |
+| `--overwrite` | also replace destination files that differ (default: copy missing files only) |
+
+Restores into `~/.cursor/projects`. Never deletes anything; by default it
+never overwrites existing files either. This is the only CursorDump command
+that writes under `~/.cursor` — that is its explicit purpose.
+
+## JSON API
+
+The web UI drives a local JSON API. All `/api/*` routes require the per-run
+token, via the `X-CursorDump-Token` header or a `?token=` query parameter,
+and reject non-loopback `Host` headers.
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/projects` | GET | list projects with session/subagent counts |
+| `/api/rescan` | POST | re-scan the projects root, invalidate caches |
+| `/api/sessions?project=<slug>` | GET | sessions of a project (with subagent nesting info) |
+| `/api/session?path=<transcript>` | GET | full parsed session: messages, thinking, tools, media |
+| `/api/facets?project=<slug>` | GET | tools used and media kinds present (global or per project) |
+| `/api/find` | POST | message-level finder: `{query, media[], tools[], project?}` → matching messages |
+| `/api/media?path=<abs-path>` | GET | stream a referenced attachment (bounded resolution) |
+| `/api/export` | POST | run an export: `{paths[], out_dir, options{…}}` → summary |
+| `/api/backup` | POST | run a backup: `{out_dir, projects?, …options}` → summary |
+| `/api/default_out_dir` | GET | suggested fresh export directory |
+| `/api/default_backup_dir` | GET | suggested backup directory |
+
+The API serves only transcript paths produced by the scanner and media files
+referenced by messages; it is not a general file server. See
+[architecture.md](architecture.md#security-model).
+
+## Dataset output schemas
+
+| File | Schema | Consumer |
+|---|---|---|
+| `sft_chatml/train.jsonl` | `{"messages":[{"role","content"}], "metadata"}` — assistant content may open with `<think>…</think>` | Unsloth, HF TRL |
+| `sft_sharegpt/train.jsonl` | `{"conversations":[{"from":"human"\|"gpt","value"}], "metadata"}` | Unsloth (`standardize_sharegpt`) |
+| `cpt/train.jsonl` | `{"text", "metadata"}` | Unsloth CPT, HF |
+| `cpt_txt/<project>__<session>.txt` | rendered `## User` / `## Assistant` dialogue | ForgeLLM `dataset/` |
+| `media/*` | sha-prefixed copies of referenced attachments | manual / vision pipelines |
+| `manifest.json` | provenance, options, sessions, media index, line counts, `secrets_detected` | tooling, audits |
+| `README.md` | generated dataset card | humans |
+
+With `--val`, each `train.jsonl` gains a sibling `val.jsonl` (same schema).
+
+### Record metadata
+
+When enabled (default), every record carries a `metadata` object that
+trainers ignore but filtering pipelines can use:
+
+- `project`, `session_id`, `session_title`, `modified_unix`
+- `chunk`, `chunks` — position when a session was split at turn boundaries
+- `oversize: true` — a single turn exceeded `max_record_chars` and was kept whole
+- `user_kind` — `"human"` (master sessions) or `"agent_brief"` (subagent records)
+- `think_chars`, `answer_chars` — audit counters for the thinking split
+- `task_calls` and per-task links (`task_prompt_hash`, `child_transcript`,
+  match kind) on records whose sessions delegated to subagents
+
+### Backup manifest (`cursordump-backup.json`)
+
+- `projects[]` — slug, source path, file and byte counts
+- `transcripts[]` — project, file, sha256, mtime for every `.jsonl`
+- `attachments[]` — original path, captured name, kind, sha256
+- `totals`, `last_run` — merged totals and the most recent run's activity
+- `options`, `warnings`
+
+Subset re-runs merge into the manifest; records for projects outside the run
+are preserved.
+
+## See also
+
+- [getting-started.md](getting-started.md) — first run and UI tour.
+- [troubleshooting.md](troubleshooting.md) — when a command fails.
+
+---
+
+## docs/architecture.md
+
+# Architecture
+
+CursorDump is a single Rust binary with two frontends over one core library:
+a local web server (axum) with an embedded browser UI, and a headless CLI.
+The core does all the work — scanning, parsing, cleaning, exporting, backup —
+and both frontends share it.
+
+## Source data
+
+Cursor stores agent transcripts on disk under `~/.cursor/projects/`:
+
+```text
+~/.cursor/projects/<project-slug>/
+├── agent-transcripts/<session-uuid>/
+│   ├── <session-uuid>.jsonl        # main session transcript
+│   └── subagents/<uuid>.jsonl      # transcripts of spawned subagents
+├── assets/ , uploads/              # user-provided media (screenshots, files)
+└── terminals/ , mcps/ , canvases/ , agent-tools/   # runtime state
+```
+
+Transcript records are JSONL:
+
+- `{"role": "user"|"assistant", "message": {"content": [block, …]}}` with
+  blocks `{"type":"text","text":…}` and
+  `{"type":"tool_use","name":…,"input":{…}}`.
+- User text wraps the human query in `<user_query>…</user_query>`;
+  surrounding text is system-injected context (attached files, rules,
+  timestamps). Some user records are entirely harness-injected (subagent and
+  background-task notifications).
+- Transcripts contain tool *calls* but never tool *results*; a subagent's
+  output exists only in its own transcript.
+
+The full observed format and the dataset-quality rules derived from it are
+documented in [knowledge-base.md](knowledge-base.md).
+
+## Module map
+
+```text
+src/
+├── main.rs           # CLI: web server (default), headless `export`, `backup`
+├── model.rs          # domain types: Project, SessionMeta, Message, Block, MediaRef
+├── scanner.rs        # project/session discovery (read-only, metadata scan)
+├── parser.rs         # tolerant JSONL parsing; user_query extraction; turn segmentation
+├── media.rs          # media reference extraction + classification
+├── search.rs         # keyword search across transcripts
+├── backup.rs         # verbatim incremental backup with integrity manifest
+├── server/
+│   ├── mod.rs        # axum router, loopback bind, Host guard, token auth, state
+│   ├── api.rs        # JSON API handlers + message-level finder index
+│   └── ui/           # embedded frontend: index.html, app.css, app.js
+└── export/
+    ├── mod.rs        # ExportOptions, orchestration, turn rendering, chunking
+    ├── clean.rs      # thinking/answer separation, link and intent cleaning
+    ├── subagent.rs   # Task-call ↔ subagent-transcript linkage
+    ├── secrets.rs    # credential detection and redaction
+    ├── sft.rs        # ChatML + ShareGPT writers
+    ├── cpt.rs        # JSONL corpus + plain-text writers
+    └── manifest.rs   # media copy, manifest.json, dataset card
+```
+
+## Data flow
+
+```text
+~/.cursor/projects/                        (read-only source)
+        │
+        ▼
+scanner.rs ──► Vec<Project{ SessionMeta… }>       metadata-only scan
+        │
+        ▼
+server/ (axum, 127.0.0.1, Host + token guarded) ──► browser UI
+   /api/projects /sessions /session /find /media /export /backup /rescan
+        │
+        ├── /api/session ──► parser.rs ──► split_thinking ──► JSON
+        ├── /api/find    ──► cached message index (keyword ∩ media ∩ tools)
+        └── /api/export  ──► export/mod.rs (spawn_blocking)
+                           ├─ parser.rs           full parse per selected session
+                           ├─ export/subagent.rs  link Task calls ↔ subagents
+                           ├─ export/clean.rs     thinking split, link/intent cleanup
+                           ├─ export/sft.rs       sft_chatml/, sft_sharegpt/
+                           ├─ export/cpt.rs       cpt/, cpt_txt/
+                           ├─ media.rs            reference extraction + classification
+                           └─ export/manifest.rs  media copy, secret scan, manifest LAST
+```
+
+IO-heavy work (parsing, search, export, backup) runs on Tokio
+`spawn_blocking`; the async runtime never blocks. The project scan is cached
+in the server state (`/api/rescan` refreshes it), and the message-level
+finder index is built once in the background at startup, invalidated on
+rescan with a generation guard so a stale build is never cached.
+
+## Turn model
+
+A turn is one or more consecutive user records plus the assistant records
+that follow, ended by the next *real* user record. The `turn_ended` markers
+present in transcripts are unreliable (they exist for a minority of turns)
+and are used only for error counting, never segmentation. Harness-injected
+user records never start a new turn. A turn is exported only when both its
+rendered user text and rendered assistant answer are non-empty.
+
+`render_assistant` produces three views per turn:
+
+- `thinking` — the reasoning narration (from `clean::split_thinking`),
+- `answer` — user-facing text (links stripped, dangling intents trimmed),
+- `native` — the full original text with thinking left inline.
+
+Writers compose from these per `ThinkingMode`: SFT emits
+`<think>…</think>` + answer when tagged; CPT uses the native text (or
+answer-only when stripping). Chunking bounds records by the largest view so
+`max_record_chars` holds in every mode.
+
+## Tolerant parsing
+
+Transcripts may be actively appended by running agents, so the parser reads
+a snapshot and never fails hard: malformed lines, torn trailing lines,
+BOMs, and invalid UTF-8 are skipped and counted (`skipped_lines`); unknown
+record and block types are preserved as opaque values and excluded from
+exports.
+
+## Security model
+
+The threat model and reporting process live in [SECURITY.md](../SECURITY.md).
+Mechanisms:
+
+- **Loopback + Host guard** — binds `127.0.0.1`; non-loopback `Host` headers
+  are rejected (DNS-rebinding defense).
+- **Per-run API token** — required on every `/api/*` request; generated at
+  startup and delivered via the opened URL (`X-CursorDump-Token` header, or
+  `?token=` for `<img>`/`<video>` requests that cannot set headers).
+- **Bounded media serving** — `/api/media` serves only files canonicalizing
+  inside the scanned root or `~/.cursor/projects`, plus external attachment
+  paths actually referenced by an indexed message; files stream rather than
+  buffer. When exploring a backup, paths re-root onto the backup's mirror.
+- **XSS-safe rendering** — all transcript text renders via `textContent`;
+  served SVG/markup gets a restrictive CSP and non-executable MIME types.
+
+## Safety invariants
+
+1. Nothing writes, locks, or opens-for-write under `~/.cursor`.
+2. Exports and backups refuse destinations inside `~/.cursor`, and refuse
+   populated directories that are not a prior dump/backup. Containment
+   checks canonicalize both sides (symlink-safe).
+3. Media copies are driven exclusively by attachments referenced in USER
+   messages: files canonicalizing inside `~/.cursor/projects`, plus external
+   workspace attachments that still exist at their referenced path.
+   Incidental paths in assistant or tool output never trigger a copy, and
+   nonexistent references are manifest-listed only.
+4. `manifest.json` is written last and records per-file line counts, so a
+   truncated export (disk full, crash) is detectable.
+5. All records in one JSONL file share the same top-level key set
+   (HuggingFace column consistency).
+
+## Non-goals
+
+- No writes into `~/.cursor` (read-only by design).
+- No tokenization or training; CursorDump produces data, trainers consume it.
+- No parsing of Cursor's internal SQLite databases — the on-disk JSONL
+  transcripts are the authoritative surface.
+
+## See also
+
+- [api.md](api.md) — CLI, JSON API, and output schemas.
+- [knowledge-base.md](knowledge-base.md) — transcript format details and
+  dataset-quality rules.
+- [exporting.md](exporting.md) — export behavior from a user's perspective.
+
+---
+
+## docs/knowledge-base.md
+
+# Knowledge Base: the Cursor Transcript Format and Dataset-Quality Rules
+
+This page documents the Cursor on-disk transcript format as observed on real
+data, and the rules CursorDump applies to produce high-quality training
+data. It is the rationale behind the behavior described in
+[exporting.md](exporting.md); contributors should read it before changing
+export or cleaning logic (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+
+Percentages below are measurements from large real-world session corpora and
+will vary by machine and usage; the rules are designed to hold regardless.
+
+## On-disk transcript format (observed July 2026)
+
+- Sessions: `~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl`.
+- Subagent (Task tool) sessions: `…/<uuid>/subagents/<sub-uuid>.jsonl`.
+  Subagents can heavily outnumber main transcripts (≈5:1 observed).
+- Records are one JSON object per line:
+  - `{"role":"user"|"assistant","message":{"content":[block,…]}}`
+  - `{"type":"turn_ended","status":"success"|…,"error"?:…}`
+- Blocks: `{"type":"text","text":…}`,
+  `{"type":"tool_use","name":…,"input":{…}}`.
+- Media lives in per-project `assets/` and `uploads/`, referenced by
+  absolute path inside user text (tags like `<image_files>`,
+  `<attached_files>`, `<uploaded_documents>`). Asset filenames are
+  underscore-sanitized.
+- No workspace-path metadata is stored; a project's display name is a
+  best-effort decode of its directory slug.
+- Session titles come from the first `<user_query>`; dates from file mtime.
+
+## Dataset-quality rules
+
+1. **`turn_ended` is unreliable** — present for only ~20% of turns. Turns
+   are segmented on the next *real* user record instead; `turn_ended` is
+   used only for error counting.
+2. **Transcripts contain tool CALLS but never tool RESULTS.** Rendering
+   tool calls into SFT teaches call syntax against invisible outputs, so
+   they are excluded by default and opt-in via `--tool-calls`.
+3. **Not every `<user_query>` is human input.** The harness injects records
+   with `<user_query>` tags for subagent-result and background-task
+   notifications. These never split a turn and are excluded from clean user
+   content (a prefix blocklist identifies them).
+4. **Assistant text embeds "thinking summary" narration** — runs of
+   `**Title Case Header**` followed by first-person deliberation, often
+   glued to the previous sentence by a single newline (~34% of assistant
+   messages observed). It is not a separate content type, so
+   `split_thinking` detects it heuristically and separates it from the
+   answer, letting exports tag it `<think>…</think>`, keep it verbatim, or
+   strip it. Detection is deliberately conservative (header-gated plus
+   first-person markers, with structural vetoes): since thinking is
+   *captured* rather than discarded, a false positive would mislabel a real
+   answer as reasoning. These traces are Cursor's summarized reasoning — a
+   distillation, not raw chain-of-thought — and the dataset card says so.
+5. **Headerless thinking exists too.** Some reasoning summaries are plain
+   first-person planning paragraphs with no bold header ("Now I'm creating
+   an end-to-end example that…"). These are detected with a stricter bar
+   than the header path: the paragraph must open with a first-person
+   planning phrase and pass marker-density and structural vetoes. Short
+   single-sentence narrations ("Let me check the parser.") count as
+   thinking; user-facing closings ("Let me know if…") are explicitly
+   excluded.
+6. **Cursor chat links `[label](<uuid>)`** appear in assistant and
+   user-pasted text; the UUIDs are dead outside the IDE. They are rewritten
+   to plain `label`.
+7. **Merged assistant turns can end with dangling intent** ("Now I'll run
+   the tests.") when tool calls are stripped, which would teach
+   announce-then-stop. Trailing intent sentences are trimmed when no
+   tool/result content follows.
+8. **Sessions are heavy-tailed**: a few sessions hold most of the
+   characters, and single turns can reach hundreds of thousands of tokens.
+   Records are chunked at turn boundaries (default 100k chars ≈ 25k tokens)
+   so ordinary records fit common context windows; a single oversized turn
+   is kept whole (splitting inside a turn breaks the example) and flagged
+   `metadata.oversize: true`.
+9. **Session ids are NOT unique** within a project: a self-forked subagent
+   reuses the parent id, and the identical content exists as two files
+   (main + `subagents/<same-id>.jsonl`). The transcript *path* is the
+   identity everywhere, and Separate-mode exports drop the subagent copy
+   when the main transcript with the same id is selected (otherwise ~6% of
+   records are near-duplicates).
+10. **Master ↔ subagent (Task tool) linkage.** A master invokes subagents
+    via a `tool_use` named "Task" (`input: {subagent_type, description,
+    prompt, run_in_background}`) with no subagent id recorded. The reliable
+    link is the subagent's first `<user_query>` matching the Task `prompt`
+    (normalized exact, then substring, then a resume pass — ~94% match
+    observed). Rule: **inline a FOREGROUND subagent's final answer as the
+    Task result; never inline a BACKGROUND result** (the master continued
+    result-blind, so splicing one in teaches ignoring tool output; ~50% of
+    Task calls are background). Never mix Inline masters and Separate
+    subagents in one dataset without deduplicating by `task_prompt_hash`,
+    or subagent tokens double-count.
+11. **Resumed Task calls must not re-splice output.** A resume re-prompts an
+    already-matched child; only the child's final answer is recoverable and
+    it is already inlined at the original call. Resumed calls render as
+    `{"status": "resumed"}` — repeating the answer duplicates large blocks
+    inside one record.
+12. **Transcripts carry live secrets.** Shell output and pasted configs
+    embed real API tokens. Every export scans its final files with
+    conservative pattern matching and reports `secrets_detected` in the
+    manifest unconditionally; `--redact-secrets` replaces matches with
+    `[REDACTED_…]` markers. Pattern-based detection is not exhaustive, and
+    the dataset card states that too.
+
+## Target formats (verified against Unsloth docs and HF `datasets`)
+
+- SFT ChatML: `{"messages":[{"role","content"}]}` — consumed directly by
+  Unsloth and Unsloth Studio.
+- SFT ShareGPT: `{"conversations":[{"from":"human"|"gpt","value"}]}` — run
+  `standardize_sharegpt` first.
+- CPT: `{"text":…}` raw corpus with no chat template or EOS baked in (the
+  trainer adds the model's EOS). Plain `.txt` files serve ForgeLLM's
+  `dataset/` layout.
+- One schema per output subdirectory:
+  `load_dataset("json", data_dir=…)` requires identical columns on every
+  line.
+
+## Local-server security rules
+
+- Bind `127.0.0.1` AND validate the `Host` header against a loopback
+  allowlist — without the Host check, DNS rebinding lets a remote page
+  reach the API.
+- Require the per-run token on every `/api/*` request so other local
+  processes cannot call the API.
+- `/api/session` resolves client paths against scanner-produced paths only
+  (in-memory equality before any filesystem access).
+- The frontend renders all transcript text via `textContent`, never
+  `innerHTML` — transcripts contain arbitrary markup.
+- axum's `Json` extractor requires `application/json`, which blocks
+  classic HTML-form CSRF.
+- Exports refuse populated non-dump directories, not just `~/.cursor`.
+
+## Safety invariants
+
+- `~/.cursor` is read-only; exports and backups refuse to write inside it
+  (canonicalized containment checks defeat `..` and symlinks).
+- Media copies are driven by USER-message references only (assistant/tool
+  text is full of incidental paths): files inside `~/.cursor/projects` plus
+  external workspace attachments that still exist. Nonexistent references
+  are manifest-listed only.
+- `manifest.json` is written last and records per-file line counts, so a
+  truncated export is detectable.
+- The parser is snapshot-tolerant: torn trailing lines, invalid UTF-8
+  (recovered lossily), BOMs, and unknown record/block types are counted,
+  never fatal — sessions may be actively written by running agents.
+
+## See also
+
+- [architecture.md](architecture.md) — where these rules live in the code.
+- [exporting.md](exporting.md) — the user-facing behavior they produce.
+
+---
+
+## docs/faq.md
+
+# FAQ
+
+Common questions about CursorDump. For symptom-driven fixes, see
+[troubleshooting.md](troubleshooting.md).
+
+## General
+
+### Does CursorDump modify my Cursor data?
+
+No. Access to `~/.cursor` is strictly read-only — nothing is written,
+locked, or opened for write, and running agent sessions are unaffected.
+Exports and backups refuse to write inside `~/.cursor`.
+
+### Does CursorDump send my data anywhere?
+
+No. It makes no network requests. The server listens on `127.0.0.1` only and
+requires a per-run token, so other machines — and other local processes that
+don't have the token — cannot reach the API. Data leaves your machine only
+if you share an export or backup yourself.
+
+### Can I use it without the web UI?
+
+Yes. `cursordump export …` and `cursordump backup …` run headlessly; see
+[api.md](api.md) for all flags.
+
+### Can I explore a machine that never had Cursor installed?
+
+Yes, via a backup: backups bundle the `cursordump` binary and mirror the
+original layout, so `./cursordump projects` inside a backup opens the full
+explorer. See [backup.md](backup.md#exploring-a-backup-without-cursor).
+
+## Privacy
+
+### What ends up in an exported dataset?
+
+Whatever your sessions contain: your queries, assistant answers (optionally
+with reasoning traces), and — depending on options — tool calls and inlined
+readable attachments. Transcripts routinely embed file contents, shell
+output, and paths from your work.
+
+### How are secrets handled?
+
+Every export scans its written files for common credential shapes
+(HuggingFace/OpenAI/GitHub/AWS/Google/Slack tokens, bearer tokens, private
+keys) and reports counts in `manifest.json` (`secrets_detected`), the
+dataset card, and the CLI/UI output. Redaction is opt-in via
+`--redact-secrets`. Detection is pattern-based and not exhaustive — always
+review before publishing. See
+[exporting.md](exporting.md#secret-scanning-and-redaction).
+
+## Datasets
+
+### Which format should I train on?
+
+- Chat/instruction fine-tuning: `sft_chatml` (works directly with Unsloth
+  and HF TRL).
+- Tools that expect ShareGPT: `sft_sharegpt` (run `standardize_sharegpt`).
+- Continued pre-training: `cpt` (JSONL) or `cpt_txt` (plain text, ForgeLLM).
+
+See [exporting.md](exporting.md) for the full decision guide.
+
+### What are the `<think>` tags in assistant content?
+
+Cursor records summarized assistant reasoning. The default export wraps it
+in `<think>…</think>` before the answer — the convention reasoning models
+(DeepSeek-R1, Qwen3) use. Choose `verbatim` to leave it inline or `strip`
+for answers only. These traces are distilled summaries, not raw
+chain-of-thought.
+
+### Why are tool calls excluded by default?
+
+Cursor transcripts contain tool *calls* but never tool *results*. Training
+on calls without results teaches call syntax against invisible outputs.
+Enable `--tool-calls` only when that is what you want.
+
+### How do subagents appear in the data?
+
+Your choice: inlined into the master conversation (foreground results
+spliced in as tool results), as separate `agent_brief` records, or dropped.
+See [exporting.md](exporting.md#subagents-task-tool).
+
+### Why is a record split into chunks / marked oversize?
+
+Sessions longer than `max_record_chars` (default 100k characters ≈ 25k
+tokens) split at turn boundaries into `metadata.chunk`-numbered records so
+they fit common context windows. A single turn larger than the limit cannot
+be split and is kept whole with `metadata.oversize: true`.
+
+### Are images and other media part of the training data?
+
+No. Media references are listed in `manifest.json` and optionally copied to
+`media/`, but text-only SFT/CPT cannot consume them, so they are never woven
+into the records. Readable attachments (txt/md/csv/…) can optionally be
+inlined as extra CPT documents.
+
+## Limitations
+
+- **Text-only exports** — no vision-dataset output; media is preserved but
+  not wired into records.
+- **Distilled reasoning** — thinking traces are Cursor's summaries, not raw
+  chain-of-thought.
+- **No tool results** — the transcripts do not contain them, so no export
+  mode can include them (foreground subagent results are the exception,
+  recovered from the subagent's own transcript).
+- **Heuristic thinking detection** — deliberately conservative; some
+  narration can remain in answers. `metadata.think_chars` /
+  `answer_chars` support downstream auditing.
+- **Secret detection is pattern-based** — not a guarantee; review before
+  sharing.
+
+---
+
+## docs/troubleshooting.md
+
+# Troubleshooting
+
+Symptom-oriented fixes. If your question is conceptual, try the
+[FAQ](faq.md) first.
+
+## Server and UI
+
+### The browser shows 401 / "unauthorized" on API calls
+
+Every `/api/*` request needs the per-run token, delivered through the URL
+CursorDump opens (or prints with `--no-open`). Reload the app through that
+tokenized URL (`http://127.0.0.1:<port>/?token=…`) rather than a plain
+bookmark — the frontend stores the token for the session and strips it from
+the address bar. Restarting the server generates a new token, so old tabs
+need the new URL.
+
+### `Error: Address already in use`
+
+Another process holds the port. Start with a different one:
+
+```bash
+cursordump --port 7075
+```
+
+### The browser doesn't open / I'm on a headless machine
+
+Run with `--no-open` and open the printed URL yourself. The server only
+listens on `127.0.0.1`; to use it from another machine, tunnel the port
+(e.g. `ssh -L 7070:127.0.0.1:7070 host`) and open the tokenized URL locally.
+
+### No projects are listed
+
+CursorDump scans `~/.cursor/projects` by default. If your data lives
+elsewhere (or you are exploring a backup), pass the root explicitly:
+
+```bash
+cursordump /path/to/projects
+```
+
+Press **↻ Rescan** after new sessions appear; the project list is cached.
+
+### An attachment shows as "missing"
+
+The transcript references a file that no longer exists at its original path
+(workspace files move or get deleted). Backups capture still-existing
+external attachments precisely to avoid this — see
+[backup.md](backup.md#what-a-backup-contains).
+
+## Export
+
+### "refusing to export into …" / "exists and is not empty"
+
+Export destinations must be outside `~/.cursor`, and an existing non-empty
+directory is only accepted when it is a previous CursorDump dump. Choose a
+fresh folder or a prior dump directory.
+
+### The export reports detected secrets
+
+The written files contain strings matching credential patterns. Re-run with
+`--redact-secrets` (or tick *redact secrets* in the dialog) and check
+`manifest.json` → `secrets_detected` is empty. Review the data regardless —
+detection is pattern-based. See
+[exporting.md](exporting.md#secret-scanning-and-redaction).
+
+### A session I selected produced no records
+
+Turns are exported only when both the rendered user text and assistant
+answer are non-empty; sessions below `--min-turns` are skipped. The export
+summary lists skipped sessions, and `manifest.json` records per-session
+`turns_trainable`.
+
+### `load_dataset` fails on the output
+
+Point `data_dir` at one format subdirectory (`sft_chatml/`, `cpt/`), not at
+the dump root — each subdirectory holds exactly one schema.
+
+### Records are larger than my context window
+
+Lower *max record size* (`max_record_chars`): sessions split at turn
+boundaries. Single oversized turns are kept whole and flagged with
+`metadata.oversize: true`; filter those downstream if needed. See
+[exporting.md](exporting.md#record-length-and-chunking).
+
+## Backup
+
+### "exists and is not empty — choose a new folder …"
+
+Backup destinations must be empty, or a previous CursorDump backup
+(recognized by `cursordump-backup.json`). This prevents merging into an
+arbitrary directory.
+
+### A warning: "copy … No such file or directory"
+
+A file disappeared between scan and copy — typically Cursor regenerating a
+runtime file mid-backup. The rest of the backup is unaffected; re-run to
+pick up the file if it exists again.
+
+### A warning: "prior manifest was unreadable"
+
+The existing `cursordump-backup.json` could not be parsed; it was preserved
+as `cursordump-backup.json.corrupt` and a fresh manifest was written for
+this run. Integrity records from the corrupt file are not merged — re-run a
+full backup to regenerate complete records.
+
+### The bundled `cursordump` won't run on macOS
+
+Clear the quarantine attribute:
+
+```bash
+xattr -d com.apple.quarantine cursordump
+```
+
+If the binary was built for a different OS/architecture, build CursorDump
+from source and run `cursordump /path/to/backup/projects`.
+
+## Build and test
+
+### `cargo build` fails on an old Rust
+
+The MSRV is 1.75. Update with `rustup update stable`.
+
+### Integration tests fail or skip on CI
+
+Tests that need real Cursor data skip gracefully when `~/.cursor/projects`
+is absent. Ensure the CI gate matches the project's:
+
+```bash
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+```
+
+## Still stuck?
+
+Open a GitHub issue with the command, the full output, and (redacted)
+transcript snippets if relevant. For suspected security problems, follow
+[SECURITY.md](../SECURITY.md) instead.
+
+---
+
+## CONTRIBUTING.md
+
+# Contributing to CursorDump
+
+Thank you for considering a contribution. This document explains how to set
+up a development environment, what the quality gates are, and how to submit
+changes.
+
+## Development setup
+
+Requires Rust stable (MSRV 1.75).
+
+```bash
+git clone https://github.com/lpalbou/cursordump
+cd cursordump
+cargo build
+cargo run                # debug build, serves http://127.0.0.1:7070
+```
+
+The web frontend (`src/server/ui/`) is embedded into the binary at compile
+time (`include_str!`), so a frontend change requires a rebuild to take effect.
+
+## Quality gates
+
+CI runs on Linux and macOS. All of the following must pass:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+Integration tests read `~/.cursor/projects` read-only when it exists and skip
+gracefully when it does not, so the suite passes on machines without Cursor.
+
+## Design rules
+
+- **Read-only source data.** Nothing may write, lock, or open-for-write under
+  `~/.cursor`. Exports and backups must refuse destinations inside it.
+- **Tolerant parsing.** Transcripts may be actively appended by running
+  agents; malformed or torn lines are skipped and counted, never fatal.
+- **Training-aware exports.** Export logic must be general-purpose: no
+  special-casing of specific sessions, and no policies that only work on test
+  fixtures. The rationale behind each dataset-quality rule is documented in
+  [docs/knowledge-base.md](docs/knowledge-base.md) — read it before changing
+  export or cleaning behavior, and update it when you learn something new
+  about the transcript format.
+- **Schema stability.** All records in one JSONL file must share the same
+  top-level key set (HuggingFace `load_dataset("json")` requires column
+  consistency).
+- **Small, focused modules.** See
+  [docs/architecture.md](docs/architecture.md) for the module map and
+  boundaries.
+
+## Submitting changes
+
+1. Fork and create a feature branch.
+2. Add or update tests for the behavior you change. Tests describe the
+   expected behavior; the implementation must work for real-world transcripts
+   beyond the fixtures.
+3. Update documentation affected by the change ([docs/](docs/README.md)) and
+   add a user-visible entry to [CHANGELOG.md](CHANGELOG.md).
+4. Ensure the quality gates pass locally.
+5. Open a pull request describing what changed and why.
+
+## Reporting issues
+
+- Bugs and feature requests: open a GitHub issue with steps to reproduce
+  (transcript snippets help — redact anything sensitive first).
+- Security vulnerabilities: follow [SECURITY.md](SECURITY.md) instead of
+  opening a public issue.
+
+## Code of conduct
+
+All participation is covered by the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+---
+
+## SECURITY.md
+
+# Security Policy
+
+## Supported versions
+
+The latest released version of CursorDump is supported with security fixes.
+
+## Reporting a vulnerability
+
+Please report vulnerabilities privately to
+**contact@abstractframework.ai** rather than opening a public issue. Include
+steps to reproduce and the impact you believe the issue has. You should
+receive an acknowledgement within a few days.
+
+## Scope and threat model
+
+CursorDump is a local tool that reads your own Cursor data and serves a UI on
+loopback. Its defenses, in scope for reports:
+
+- **Loopback-only binding** — the server listens on `127.0.0.1` and rejects
+  requests whose `Host` header is not a loopback name (DNS-rebinding defense).
+- **Per-run API token** — every `/api/*` request requires a random token
+  generated at startup and delivered to the browser through the opened URL.
+  Other local processes cannot call the API without it.
+- **Bounded file serving** — `/api/media` serves only files that resolve
+  inside the scanned projects root / `~/.cursor/projects`, or external
+  attachment paths actually referenced by an indexed transcript message. It
+  is not a general file server.
+- **Read-only source** — nothing writes, locks, or opens-for-write under
+  `~/.cursor`; exports and backups refuse destinations inside it, with
+  containment checks canonicalizing both sides (symlink-safe).
+- **Output rendering** — transcript text renders in the browser via
+  `textContent` (no HTML execution); served SVG/markup gets a restrictive
+  `Content-Security-Policy` and a non-executable MIME type.
+
+Out of scope: attacks requiring an attacker who already has local code
+execution as your user (they can read `~/.cursor` directly), and the
+sensitivity of dataset contents you choose to export or share — see the
+privacy guidance in [docs/faq.md](docs/faq.md#privacy).
+
+## Data handling
+
+CursorDump makes no network requests. All data stays on your machine unless
+you share an export or backup yourself. Exports scan their output for common
+credential shapes and report them in the manifest (`secrets_detected`);
+redaction is available with `--redact-secrets`.

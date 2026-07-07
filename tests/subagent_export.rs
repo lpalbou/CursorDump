@@ -2,7 +2,7 @@
 //! master+subagent fixture written to a temp dir (never touches ~/.cursor).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 
 use cursordump::export::{run_export, ExportEvent, ExportOptions, ExportSummary, SubagentMode};
@@ -18,7 +18,7 @@ fn scratch(name: &str) -> PathBuf {
 
 /// Build a master transcript that spawns one foreground + one background Task,
 /// plus the matching subagent transcripts under `subagents/`.
-fn build_fixture(root: &PathBuf) -> SessionMeta {
+fn build_fixture(root: &Path) -> SessionMeta {
     let master_id = "11111111-1111-1111-1111-111111111111";
     let tdir = root.join("agent-transcripts").join(master_id);
     fs::create_dir_all(tdir.join("subagents")).unwrap();
@@ -74,11 +74,18 @@ fn build_fixture(root: &PathBuf) -> SessionMeta {
     }
 }
 
-fn do_export(master: SessionMeta, out: &PathBuf, options: ExportOptions) -> ExportSummary {
+fn do_export(master: SessionMeta, out: &Path, options: ExportOptions) -> ExportSummary {
     let (tx, rx) = channel();
     // cursor_root is a scratch parent that is NOT ~/.cursor.
     let cursor_root = out.join("fake-cursor-root");
-    run_export(vec![master], out.clone(), options, cursor_root, tx, || {});
+    run_export(
+        vec![master],
+        out.to_path_buf(),
+        options,
+        cursor_root,
+        tx,
+        || {},
+    );
     let mut summary = None;
     while let Ok(ev) = rx.try_recv() {
         match ev {

@@ -1,0 +1,35 @@
+# CursorDump
+
+> A local Rust tool that explores Cursor IDE agent sessions, exports them as
+> SFT/CPT training datasets (Unsloth, ForgeLLM, HuggingFace `datasets`), and
+> makes complete Cursor-independent backups. Read-only on `~/.cursor`;
+> loopback-only web UI plus a headless CLI.
+
+Start with the README for the overview and quick start, then the docs below
+by task: getting-started for the first run, exporting for dataset control,
+backup for preservation, api for the exact CLI/JSON/schema surface.
+
+## Core Docs
+
+- [README.md](README.md): project overview, capabilities, quick start
+- [docs/getting-started.md](docs/getting-started.md): install, first launch, UI tour, first export
+- [docs/architecture.md](docs/architecture.md): modules, data flow, turn model, security and safety invariants
+- [docs/api.md](docs/api.md): CLI flags, local JSON API routes, dataset output schemas
+- [docs/faq.md](docs/faq.md): privacy, thinking traces, format choices, limitations
+- [docs/troubleshooting.md](docs/troubleshooting.md): symptom-oriented fixes for server, export, backup, build
+
+## Topic Deep Dives
+
+- [docs/exporting.md](docs/exporting.md): every export option (thinking, subagents, cleaning, chunking, secret redaction) plus Unsloth Studio and ForgeLLM walkthroughs
+- [docs/backup.md](docs/backup.md): verbatim incremental backups, integrity manifest, bundled explorer, restore
+- [docs/knowledge-base.md](docs/knowledge-base.md): the observed Cursor transcript format and the dataset-quality rules behind the export behavior
+
+## Contributing
+
+- [CONTRIBUTING.md](CONTRIBUTING.md): development setup, quality gates, design rules
+- [SECURITY.md](SECURITY.md): threat model and vulnerability reporting
+
+## Optional
+
+- [CHANGELOG.md](CHANGELOG.md): release history
+- [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md): upstream projects and credits

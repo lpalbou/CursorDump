@@ -1,7 +1,8 @@
 [package]
 name = "cursordump"
-version = "0.6.2"
+version = "0.9.0"
 edition = "2021"
+rust-version = "1.75"
 description = "Explore Cursor agent sessions, export them as SFT/CPT training datasets, and make full Cursor-independent backups"
 license = "MIT"
 authors = ["Laurent-Philippe Albou <contact@abstractframework.ai>"]
@@ -9,6 +10,8 @@ repository = "https://github.com/lpalbou/cursordump"
 readme = "README.md"
 keywords = ["cursor", "llm", "fine-tuning", "dataset", "backup"]
 categories = ["command-line-utilities", "development-tools"]
+# Screenshots are only for the GitHub README; keep the published crate lean.
+exclude = ["docs/*.png"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -18,7 +21,8 @@ dirs = "6"
 sha2 = "0.10"
 anyhow = "1"
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs"] }
+tokio-util = { version = "0.7", features = ["io"] }
 open = "5"
 
 [profile.release]

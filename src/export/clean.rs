@@ -127,8 +127,15 @@ fn normalize_header_breaks(text: &str, header: &Regex) -> String {
 /// deliberation heuristic silently fails on them, leaving reasoning in the
 /// answer. The emitted text keeps the original characters — this is only used
 /// inside the predicates.
-fn norm_apos(s: &str) -> String {
-    s.replace(['\u{2019}', '\u{2018}', '\u{02bc}'], "'")
+fn norm_apos(s: &str) -> std::borrow::Cow<'_, str> {
+    // Only allocate when a typographic apostrophe is actually present — the
+    // vast majority of text is ASCII and must stay allocation-free (this runs
+    // per paragraph on every message).
+    if s.contains(['\u{2019}', '\u{2018}', '\u{02bc}']) {
+        std::borrow::Cow::Owned(s.replace(['\u{2019}', '\u{2018}', '\u{02bc}'], "'"))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
 }
 
 /// STRONG planning openers: unambiguous first-person planning phrases. A
@@ -206,12 +213,23 @@ fn has_deliverable_structure(body: &str) -> bool {
 /// planning. Strong openers qualify alone; weak openers need marker density.
 fn is_headerless_deliberation(para: &str) -> bool {
     let p = para.trim();
-    if p.len() < 60 || has_deliverable_structure(p) {
+    if has_deliverable_structure(p) {
         return false;
     }
     let pn = norm_apos(p);
+    // "Let me know …" is a user-facing closing line, not planning.
+    if pn.starts_with("Let me know") {
+        return false;
+    }
     if STRONG_OPENERS.iter().any(|o| pn.starts_with(o)) {
-        return true;
+        // Strong openers are unambiguous, so even a short single-sentence
+        // narration ("Let me check the parser.") is thinking — the 60-char
+        // floor only applies to multi-sentence paragraphs, where a longer
+        // body could plausibly be an answer that merely starts with "I'll".
+        return p.len() >= 60 || (!p.contains('\n') && p.len() >= 10);
+    }
+    if p.len() < 60 {
+        return false;
     }
     if DELIBERATION_OPENERS.iter().any(|o| pn.starts_with(o)) {
         return is_deliberation(p);
@@ -495,6 +513,25 @@ mod tests {
             answer.contains("The script demonstrates"),
             "descriptive prose stays"
         );
+    }
+
+    #[test]
+    fn short_strong_opener_sentence_is_thinking() {
+        // Single short narration sentences ("Let me check the parser.") are
+        // planning, not answer content — even under the 60-char floor.
+        let text = "Let me check the parser.\n\nThe parser handles BOM bytes correctly.";
+        let (thinking, answer) = split_thinking(text);
+        assert!(thinking.contains("Let me check the parser."));
+        assert!(answer.contains("The parser handles BOM"));
+        assert!(!answer.contains("Let me check"));
+    }
+
+    #[test]
+    fn let_me_know_closing_line_stays_in_answer() {
+        let text = "The fix is deployed.\n\nLet me know if anything else breaks.";
+        let (thinking, answer) = split_thinking(text);
+        assert!(thinking.is_empty(), "got thinking: {thinking}");
+        assert!(answer.contains("Let me know if anything else breaks."));
     }
 
     #[test]

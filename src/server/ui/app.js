@@ -23,10 +23,31 @@ const state = {
   lastResults: null,       // cached /api/find response for re-render
 };
 
+/* API access token: delivered once in the opening URL (?token=…), then kept in
+   sessionStorage for this tab and stripped from the address bar. Sent as a
+   header on fetch calls and as a query param on media URLs (which are loaded
+   via <img>/<video> and can't set headers). */
+const TOKEN = (() => {
+  const u = new URL(location.href);
+  const t = u.searchParams.get("token");
+  if (t) {
+    sessionStorage.setItem("cd_token", t);
+    u.searchParams.delete("token");
+    history.replaceState(null, "", u.pathname + u.search + u.hash);
+  }
+  return sessionStorage.getItem("cd_token") || "";
+})();
+const mediaUrl = (path) =>
+  "/api/media?path=" + encodeURIComponent(path) + "&token=" + encodeURIComponent(TOKEN);
+
 const $ = (id) => document.getElementById(id);
 const api = async (url, body) => {
-  const opts = body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {};
+  const headers = { "X-CursorDump-Token": TOKEN };
+  const opts = body
+    ? { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    : { headers };
   const r = await fetch(url, opts);
+  if (r.status === 401) throw new Error("Not authorized — reopen CursorDump from the terminal link (the access token is per-session).");
   if (!r.ok) throw new Error((await r.text()) || r.statusText);
   return r.json();
 };
@@ -315,7 +336,7 @@ function resultCard(r) {
     const strip = el("div", "result-media");
     for (const m of imgs.slice(0, 5)) {
       if (!m.available) { strip.append(el("span", "thumb missing", "🚫")); continue; }
-      const url = "/api/media?path=" + encodeURIComponent(m.path);
+      const url = mediaUrl(m.path);
       const t = el("img", "thumb"); t.src = url; t.loading = "lazy"; t.alt = m.name; t.title = m.name;
       t.onclick = (e) => { e.stopPropagation(); openLightbox(url, m.name); };
       strip.append(t);
@@ -435,7 +456,7 @@ function openLightbox(url, name) {
 function attachmentsNode(media) {
   const wrap = el("div", "attachments");
   for (const a of media) {
-    const url = "/api/media?path=" + encodeURIComponent(a.path);
+    const url = mediaUrl(a.path);
     if (!a.available) { const c = el("span", "attach-chip missing", a.name + " (missing)"); c.title = a.path; wrap.append(c); continue; }
     if (a.kind === "image") {
       const link = el("a", "attach-img-link"); link.href = url; link.title = a.name; link.setAttribute("data-name", a.name);
@@ -543,6 +564,7 @@ async function doExport() {
     clean_assistant: $("o-clean").checked, final_response_only: $("o-final-only").checked,
     user_content: $("o-raw-user").checked ? "raw" : "clean", copy_media: $("o-media").checked,
     inline_readable_attachments: $("o-inline-attach").checked, with_metadata: $("o-metadata").checked,
+    redact_secrets: $("o-redact").checked,
     val_fraction: parseFloat($("o-val").value) || 0,
   }};
   try {

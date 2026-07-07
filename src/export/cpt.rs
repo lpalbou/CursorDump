@@ -100,6 +100,14 @@ fn write_session_records(
             md["kind"] = json!("session");
             md["think_chars"] = json!(chunk.iter().map(|t| t.thinking.len()).sum::<usize>());
             md["answer_chars"] = json!(chunk.iter().map(|t| t.answer.len()).sum::<usize>());
+            // Single turn larger than max_record_chars: flag for downstream
+            // filtering (it cannot be split at a turn boundary).
+            if options.max_record_chars > 0 {
+                let sz: usize = chunk.iter().map(|t| t.chars()).sum();
+                if sz > options.max_record_chars {
+                    md["oversize"] = json!(true);
+                }
+            }
             record["metadata"] = md;
         }
         writeln!(
@@ -160,9 +168,9 @@ fn render_dialogue(
     let mut out = String::new();
     if session.meta.is_subagent {
         if let Some(parent) = &session.meta.parent_id {
+            let short: String = parent.chars().take(8).collect();
             out.push_str(&format!(
-                "# Subagent transcript (spawned by session {})\n\n",
-                &parent[..8.min(parent.len())]
+                "# Subagent transcript (spawned by session {short})\n\n"
             ));
         }
     }

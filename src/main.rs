@@ -20,6 +20,8 @@ USAGE:
   cursordump [--port N] [--no-open] [<projects-root>]   start the web UI (default)
   cursordump export --project <slug> --out <dir> [options]
   cursordump backup --out <dir> [--project <slug>]... [options]
+  cursordump verify <backup-dir>                        check backup integrity
+  cursordump restore --from <backup-dir> [options]      restore into ~/.cursor/projects
 
 EXPORT OPTIONS:
   --all-formats                       sft_chatml + sft_sharegpt + cpt + cpt_txt
@@ -29,20 +31,31 @@ EXPORT OPTIONS:
   --val <fraction>                    validation split, e.g. 0.1
   --min-turns N                       skip sessions with fewer trainable turns
   --tool-calls --raw-user --no-clean --no-media --no-metadata --final-only
+  --redact-secrets                    replace detected API keys/tokens with [REDACTED_…]
 
 BACKUP OPTIONS:
   --project <slug>                    repeatable; default = all projects
   --skip-runtime                      omit terminals/ and agent-tools/
   --no-verify --no-app --no-attachments
 
-The web UI serves on 127.0.0.1 only and never writes to ~/.cursor.";
+RESTORE OPTIONS:
+  --from <backup-dir>                 backup to restore from (required)
+  --project <slug>                    repeatable; default = all projects in the backup
+  --dry-run                           print what would be copied, write nothing
+  --overwrite                         also replace destination files that differ
+                                      (default: only copy files missing at destination)
+
+The web UI serves on 127.0.0.1 only and never writes to ~/.cursor
+(restore, which exists to write there, is the explicit exception).";
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args
-        .iter()
-        .any(|a| a == "--help" || a == "-h" || a == "help")
-    {
+    // Only treat help as help when it's the FIRST token, so a project named
+    // "help" or `--out help` doesn't hijack a real command.
+    if matches!(
+        args.first().map(String::as_str),
+        Some("--help" | "-h" | "help")
+    ) {
         println!("{HELP}");
         return Ok(());
     }
@@ -54,6 +67,14 @@ fn main() -> anyhow::Result<()> {
         headless_backup(&args[1..]);
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("verify") {
+        headless_verify(&args[1..]);
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("restore") {
+        headless_restore(&args[1..]);
+        return Ok(());
+    }
 
     let mut port: u16 = 7070;
     let mut open_browser = true;
@@ -62,7 +83,13 @@ fn main() -> anyhow::Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "--port" => {
-                port = args.get(i + 1).and_then(|p| p.parse().ok()).unwrap_or(7070);
+                port = match args.get(i + 1).map(|p| p.parse::<u16>()) {
+                    Some(Ok(p)) => p,
+                    _ => {
+                        eprintln!("--port expects a number 1-65535");
+                        std::process::exit(2);
+                    }
+                };
                 i += 2;
             }
             "--no-open" => {
@@ -179,6 +206,10 @@ fn headless_export(args: &[String]) {
                 options.final_response_only = true;
                 i += 1;
             }
+            "--redact-secrets" => {
+                options.redact_secrets = true;
+                i += 1;
+            }
             other => {
                 eprintln!("unknown argument: {other}");
                 std::process::exit(2);
@@ -194,7 +225,8 @@ fn headless_export(args: &[String]) {
             "usage: cursordump export --project <slug> --out <dir>\n  \
              [--all-formats] [--subagent-mode inline|separate|drop] [--include-subagents]\n  \
              [--thinking tagged|verbatim|strip] [--val <fraction>] [--min-turns N]\n  \
-             [--tool-calls] [--raw-user] [--no-clean] [--no-media] [--no-metadata] [--final-only]"
+             [--tool-calls] [--raw-user] [--no-clean] [--no-media] [--no-metadata] [--final-only]\n  \
+             [--redact-secrets]"
         );
         std::process::exit(2);
     };
@@ -243,6 +275,125 @@ fn headless_export(args: &[String]) {
                 eprintln!("export failed: {e}");
                 std::process::exit(1);
             }
+        }
+    }
+}
+
+fn headless_verify(args: &[String]) {
+    let Some(dir) = args.first().filter(|a| !a.starts_with('-')) else {
+        eprintln!("usage: cursordump verify <backup-dir>");
+        std::process::exit(2);
+    };
+    match cursordump::backup::verify_backup(std::path::Path::new(dir)) {
+        Ok(r) => {
+            println!(
+                "transcripts: {} ok, {} failed, {} missing",
+                r.transcripts_ok,
+                r.transcripts_failed.len(),
+                r.transcripts_missing.len()
+            );
+            println!(
+                "attachments: {} ok, {} failed, {} missing",
+                r.attachments_ok,
+                r.attachments_failed.len(),
+                r.attachments_missing.len()
+            );
+            if r.unhashed > 0 {
+                println!(
+                    "{} entr(ies) had no recorded hash (backup made with --no-verify)",
+                    r.unhashed
+                );
+            }
+            for f in r.transcripts_failed.iter().chain(&r.attachments_failed) {
+                eprintln!("HASH MISMATCH: {f}");
+            }
+            for m in r.transcripts_missing.iter().chain(&r.attachments_missing) {
+                eprintln!("MISSING: {m}");
+            }
+            for u in &r.unlisted {
+                eprintln!("UNLISTED (not in manifest, integrity unknown): {u}");
+            }
+            if r.is_ok() {
+                println!("backup verified OK");
+            } else {
+                eprintln!("backup verification FAILED");
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("verify failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn headless_restore(args: &[String]) {
+    use cursordump::backup::{restore_backup, RestoreOptions};
+    let mut from: Option<std::path::PathBuf> = None;
+    let mut options = RestoreOptions::default();
+    let mut projects: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--from" => {
+                from = match args.get(i + 1).filter(|v| !v.starts_with('-')) {
+                    Some(v) => Some(std::path::PathBuf::from(v)),
+                    None => {
+                        eprintln!("--from expects a backup directory");
+                        std::process::exit(2);
+                    }
+                };
+                i += 2;
+            }
+            "--project" => {
+                match args.get(i + 1).filter(|v| !v.starts_with('-')) {
+                    Some(p) => projects.push(p.clone()),
+                    None => {
+                        eprintln!("--project expects a slug");
+                        std::process::exit(2);
+                    }
+                }
+                i += 2;
+            }
+            "--dry-run" => {
+                options.dry_run = true;
+                i += 1;
+            }
+            "--overwrite" => {
+                options.overwrite = true;
+                i += 1;
+            }
+            other => {
+                eprintln!("unknown argument: {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let Some(from) = from else {
+        eprintln!("usage: cursordump restore --from <backup-dir> [--project <slug>]... [--dry-run] [--overwrite]");
+        std::process::exit(2);
+    };
+    if !projects.is_empty() {
+        options.projects = Some(projects);
+    }
+    let dest = scanner::default_root().expect("cannot determine ~/.cursor/projects");
+    match restore_backup(&from, &dest, &options) {
+        Ok(s) => {
+            let verb = if s.dry_run { "would copy" } else { "copied" };
+            println!(
+                "{verb} {} file(s) ({:.1} MB), {} already present -> {}",
+                s.files_copied,
+                s.bytes_copied as f64 / 1_048_576.0,
+                s.files_skipped_existing,
+                dest.display()
+            );
+            for w in s.warnings.iter().take(10) {
+                eprintln!("warning: {w}");
+            }
+        }
+        Err(e) => {
+            eprintln!("restore failed: {e}");
+            std::process::exit(1);
         }
     }
 }

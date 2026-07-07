@@ -2,6 +2,128 @@
 
 All notable changes to CursorDump are documented here.
 
+## [0.9.0] — 2026-07-07
+
+Installation without a Rust toolchain, and first-class backup verification
+and restore.
+
+### Added
+- **`cursordump verify <backup-dir>`** — recomputes every transcript and
+  attachment sha256 recorded in the backup manifest and reports
+  ok/mismatched/missing counts (read-only, non-zero exit on failure). Backup
+  manifests now record a `path` (relative to the backup root) per transcript;
+  older manifests are still verifiable via basename lookup. Verification is
+  tamper-aware: manifest paths escaping the backup are rejected, recorded
+  paths never silently fall back to same-named copies, and transcripts
+  present in the tree but absent from the manifest are flagged as unlisted.
+- **`cursordump restore --from <backup-dir>`** — restores a backup into
+  `~/.cursor/projects` with conservative semantics: copies missing files
+  only by default, `--overwrite` for differing files, `--dry-run` preview,
+  `--project` subsetting, never deletes. This is the only command that
+  writes under `~/.cursor`.
+- **Prebuilt binaries** — a `release.yml` workflow builds macOS
+  (arm64, x86_64) and Linux (x86_64, arm64) archives with sha256 checksums
+  and attaches them to the GitHub release on `v*` tags.
+- **`install.sh`** — one-line installer that downloads the latest release
+  for the detected platform, checks its sha256, and installs to
+  `~/.local/bin`.
+
+## [0.8.0] — 2026-07-07
+
+Fixes from the final adversarial round: a data/ML-quality review of actual
+exported datasets and a second independent code review.
+
+### Data quality (training exports)
+- **Secret detection & optional redaction.** Every export scans the FINAL
+  written files for common credential shapes (HuggingFace/OpenAI/GitHub/AWS/
+  Google/Slack tokens, bearer tokens, private keys) and reports counts in the
+  manifest (`secrets_detected`), the dataset card and the CLI/UI warnings.
+  New `--redact-secrets` (CLI) / "redact secrets" (UI) replaces detected
+  secrets with `[REDACTED_…]` markers. Verified live: an un-redacted export of
+  this repo's own sessions reported 8 secrets; the redacted re-run reported 0
+  with markers in place.
+- **Self-fork de-duplication.** A `resume: "self"` session exists on disk as
+  BOTH a main transcript and `subagents/<same-id>.jsonl` with identical
+  content; Separate-mode exports emitted both as near-duplicate records.
+  Exports now drop the subagent copy when the main transcript with the same
+  session id is selected.
+- **Resumed Task calls no longer splice duplicate output.** A resume
+  re-prompts a child whose final answer was already inlined at the original
+  call; the resumed call now renders `{"status": "resumed"}` instead of
+  repeating the same (often large) result inside one record.
+- **Short narration sentences are now thinking.** Single-sentence strong
+  openers under the old 60-char floor ("Let me check the parser.") leaked into
+  answers; they are now classified as thinking, with an explicit veto for
+  user-facing "Let me know …" closings.
+- **Oversize records flagged.** A single turn larger than `max_record_chars`
+  cannot be split at a turn boundary; it now carries `metadata.oversize: true`
+  and the dataset card explains the char (not token) semantics and the
+  session-level validation split trade-off.
+
+### Backup correctness
+- `--no-verify` now actually skips transcript hashing (the option was
+  previously accepted and ignored).
+- External attachments are re-copied and re-hashed when the source file
+  changed (size/mtime), instead of being skipped forever after first capture;
+  copies now preserve the source mtime.
+- An existing-but-unparseable prior manifest is preserved as
+  `cursordump-backup.json.corrupt` with a warning, instead of being silently
+  treated as absent (its records were previously lost on the next write).
+
+### Documentation
+- Restructured the documentation set for publication: task-oriented guides
+  (`docs/getting-started.md`, `docs/exporting.md`, `docs/backup.md`), a
+  complete reference (`docs/api.md`), `docs/architecture.md`,
+  `docs/knowledge-base.md`, `docs/faq.md`, `docs/troubleshooting.md`, a docs
+  index (`docs/README.md`), community files (`CONTRIBUTING.md`,
+  `SECURITY.md`, `CODE_OF_CONDUCT.md`, `ACKNOWLEDGEMENTS.md`), and
+  AI-readable indexes (`llms.txt`, `llms-full.txt`). The former
+  `docs/Overview.md`, `docs/DataFlow.md`, `docs/UserGuide.md`, and
+  `docs/KnowledgeBase.md` were folded into this set.
+
+### Server
+- `/api/media` streams files instead of buffering them in memory (session
+  videos can be hundreds of MB).
+- `/api/find` builds its media-resolution context and project-name map once
+  per request instead of re-snapshotting projects per result.
+- Message-index builds are serialized and generation-guarded: a rescan during
+  a build can no longer resurrect a stale index, and concurrent first-searches
+  no longer each pay the full parse cost.
+- Removed the dead `/api/search` route (superseded by `/api/find`).
+
+## [0.7.0] — 2026-07-07
+
+Pre-publication hardening from a final adversarial code review.
+
+### Security
+- **API access token.** The server generates a random per-run token, opens the
+  browser with it (`/?token=…`), and requires it on every `/api/*` request
+  (header `X-CursorDump-Token`, or `?token=` for `<img>`/`<video>` media). The
+  frontend consumes the token, stores it in `sessionStorage`, and strips it
+  from the address bar. This closes unauthenticated local access to
+  `/api/backup` (exfiltration) and `/api/media` on top of the existing
+  loopback + Host-header (DNS-rebinding) guards.
+- **`/api/media` no longer reads arbitrary files.** Workspace `@file`
+  attachments are served only when some indexed message actually references
+  that exact path — an existing-but-unreferenced media file now returns 404
+  (verified), removing the arbitrary-file-read widened in 0.6.1.
+- **Containment checks canonicalize both sides** (`validate_out_dir`,
+  `validate_backup_dir`, `within_cursor`, media boundary), so a symlink
+  component can't make an `~/.cursor` guard fail open.
+
+### Fixed
+- Chunk sizing now counts the largest rendering a turn can emit (CPT/Verbatim
+  `native`, incl. inlined Task results), so `max_record_chars` bounds every mode.
+- `/api/export` de-duplicates selected paths (no doubled records).
+- `render_dialogue` uses `chars().take(8)` for parent-id display (no multibyte
+  panic).
+- CLI: `--port` errors on a bad value; `--help` only when it's the first token.
+- Clippy is clean under `--all-targets` (tests included); CI now runs that.
+- Scale test right-sized (25k turns) and no longer asserts wall-clock timing.
+
+### Added
+- `rust-version = "1.75"` (MSRV) and `exclude = ["docs/*.png"]` in Cargo.toml.
+
 ## [0.6.2] — 2026-07-07
 
 Adversarial release verification: exports certified 8/8 (all format/mode

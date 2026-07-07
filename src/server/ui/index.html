@@ -10,7 +10,7 @@
 <header id="topbar">
   <div class="brand">◆ CursorDump</div>
   <div class="source-dd">
-    <button id="source-btn" class="btn" type="button" title="What you are viewing">⌂ Viewing: Live Cursor data ▾</button>
+    <button id="source-btn" class="btn" type="button" title="What you are viewing">⌂ Viewing: Live data ▾</button>
     <div id="source-menu" class="tools-menu" hidden></div>
   </div>
   <div class="finder">
@@ -25,10 +25,9 @@
     <span id="search-msg"></span>
   </div>
   <div class="grow"></div>
-  <div id="selection-summary" class="muted">0 selected</div>
-  <button id="export-btn" class="btn primary" disabled>⬇ Export for training…</button>
-  <button id="backup-btn" class="btn" title="Save a full, verbatim copy of all Cursor data">🗄 Create backup…</button>
-  <span class="readonly" title="CursorDump never writes to ~/.cursor">🔒 read-only</span>
+  <button id="export-btn" class="btn primary" disabled title="Export the ticked sessions as SFT/CPT training datasets">⬇ Export<span id="selection-summary" class="count-badge" hidden></span></button>
+  <button id="backup-btn" class="btn" title="Save a full, verbatim copy of all Cursor data">🗄 Create backup</button>
+  <span class="readonly" title="Read-only: CursorDump never writes to ~/.cursor">🔒</span>
 </header>
 
 <main id="layout">

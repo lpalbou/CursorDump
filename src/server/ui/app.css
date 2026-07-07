@@ -27,11 +27,13 @@ body {
   font: 14px/1.55 -apple-system, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
   display: flex; flex-direction: column;
 }
+/* The `hidden` attribute must always win over any display: rule. */
+[hidden] { display: none !important; }
 
 /* ---------- top bar ---------- */
 #topbar {
-  display: flex; align-items: center; gap: 12px;
-  padding: 10px 16px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
 }
@@ -39,8 +41,8 @@ body {
 .grow { flex: 1; }
 
 /* ---------- finder bar ---------- */
-.finder { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.finder > input#search-input { width: 240px; }
+.finder { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; min-width: 0; }
+.finder > input#search-input { width: clamp(160px, 22vw, 280px); }
 .finder-facets { display: flex; gap: 4px; }
 .tools-dd { position: relative; }
 .tools-menu {
@@ -57,9 +59,14 @@ body {
 .scope { font-size: 12px; color: var(--text); background: var(--card); border: 1px solid var(--border); border-radius: 9px; padding: 2px 6px 2px 9px; display: inline-flex; align-items: center; gap: 4px; }
 .scope-x { background: none; border: none; color: var(--text-weak); cursor: pointer; font-size: 11px; }
 .scope-x:hover { color: var(--error); }
-.scope-all { font-size: 12px; color: var(--text-faint); }
-.readonly { color: var(--assistant); font-size: 12px; white-space: nowrap; }
+.readonly { color: var(--assistant); font-size: 14px; white-space: nowrap; cursor: help; }
 .muted { color: var(--text-weak); font-size: 13px; }
+.count-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 5px; margin-left: 7px;
+  background: var(--accent); color: #fff;
+  border-radius: 9px; font-size: 11px; font-weight: 700; line-height: 1;
+}
 
 /* ---------- inputs & buttons ---------- */
 input[type="search"], input[type="text"], input[type="number"] {
@@ -79,11 +86,18 @@ input:focus { border-color: var(--accent); }
   padding: 6px 12px;
   cursor: pointer;
   font-size: 13px;
+  white-space: nowrap;
+  display: inline-flex; align-items: center;
 }
 .btn:hover:not(:disabled) { background: var(--card-hover); border-color: var(--accent); }
 .btn:disabled { opacity: .45; cursor: default; }
 .btn.primary { background: var(--accent-dim); border-color: var(--accent); font-weight: 600; }
 .btn.small { padding: 3px 8px; font-size: 12px; }
+/* Keyboard accessibility: a visible focus ring on every interactive control. */
+.btn:focus-visible, .facet-chip:focus-visible, .step:focus-visible,
+input:focus-visible, .tool-item:focus-visible, .source-item:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
 
 /* ---------- layout ---------- */
 #layout { flex: 1; display: flex; min-height: 0; }
@@ -291,8 +305,9 @@ mark { background: rgba(232,179,90,.35); color: #ffe9c2; border-radius: 3px; pad
   color: var(--text); text-decoration: none;
 }
 .attach-chip:hover { border-color: var(--accent); }
-.attach-chip.missing { color: var(--text-faint); border-style: dashed; }
-.attach-chip.missing::before { content: "🚫 "; }
+.attach-chip.missing { color: var(--text-faint); border-style: dashed; cursor: pointer; font: inherit; font-size: 12px; }
+.missing-list { margin-top: 4px; }
+.missing-list .attach-chip.missing { cursor: default; }
 
 .tools { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .tool-chip {
@@ -367,6 +382,15 @@ dialog h2 { margin: 0 0 4px; font-size: 18px; }
 }
 .facet-chip:hover { border-color: var(--accent); color: var(--text); }
 .facet-chip.on { background: var(--accent-dim); border-color: var(--accent); color: var(--text); }
+/* Icon-only variant (top bar): fixed square, emoji centered, tooltip carries meaning. */
+.facet-chip.icon {
+  width: 28px; height: 26px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px; border-radius: 7px;
+  filter: grayscale(60%); opacity: .8;
+}
+.facet-chip.icon:hover { filter: none; opacity: 1; }
+.facet-chip.icon.on { filter: none; opacity: 1; box-shadow: inset 0 0 0 1px var(--accent); }
 .facet-clear { align-self: flex-start; background: none; border: none; color: var(--accent); font-size: 11px; cursor: pointer; padding: 0; }
 .facet-bar {
   display: flex; flex-direction: column; gap: 4px;

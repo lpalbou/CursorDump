@@ -167,8 +167,14 @@ function renderSessions() {
 
 function updateSelectionSummary() {
   const n = state.selected.size;
-  $("selection-summary").textContent = n === 0 ? "0 selected" : `${n} selected`;
-  $("export-btn").disabled = n === 0;
+  const badge = $("selection-summary");
+  badge.hidden = n === 0;
+  badge.textContent = String(n);
+  const btn = $("export-btn");
+  btn.disabled = n === 0;
+  btn.title = n === 0
+    ? "Tick sessions to export them as SFT/CPT training datasets"
+    : `Export ${n} ticked session(s) as SFT/CPT training datasets`;
 }
 
 function sessionRow(s, subCount) {
@@ -196,28 +202,30 @@ function sessionRow(s, subCount) {
 /* ---------------- the Finder bar ---------------- */
 
 function renderFinderBar() {
-  // Media chips (fixed set, always visible).
+  // Media chips: icon-only, tooltip explains (minimal-text top bar).
   const mc = $("media-chips");
   mc.replaceChildren();
   for (const k of MEDIA_KINDS) {
     const on = state.finder.media.has(k);
-    const chip = el("button", "facet-chip" + (on ? " on" : ""), MEDIA_ICON[k] + " " + k);
+    const chip = el("button", "facet-chip icon" + (on ? " on" : ""), MEDIA_ICON[k]);
+    chip.title = (on ? "Showing" : "Show") + ` only messages with ${k} attachments`;
+    chip.setAttribute("aria-pressed", on ? "true" : "false");
     chip.onclick = () => { on ? state.finder.media.delete(k) : state.finder.media.add(k); runFinder(); };
     mc.append(chip);
   }
   // Tools dropdown button reflects count.
   const tb = $("tools-btn");
-  tb.textContent = state.finder.tools.size ? `🔧 Tools (${state.finder.tools.size}) ▾` : "🔧 Tools ▾";
+  tb.textContent = state.finder.tools.size ? `🔧 ${state.finder.tools.size} ▾` : "🔧 ▾";
+  tb.title = "Filter by tool used";
   tb.classList.toggle("on", state.finder.tools.size > 0);
   // Scope chip.
   const sc = $("scope-chip");
   sc.replaceChildren();
   if (state.activeProject) {
     const chip = el("span", "scope", "◉ " + projectName(state.activeProject));
+    chip.title = "The finder is scoped to this project";
     const x = el("button", "scope-x", "✕"); x.title = "Search all projects"; x.onclick = () => deselectProject();
     chip.append(x); sc.append(chip);
-  } else {
-    sc.append(el("span", "scope-all", "all projects"));
   }
   $("finder-clear").hidden = !finderActive();
 }
@@ -458,9 +466,28 @@ function openLightbox(url, name) {
 
 function attachmentsNode(media) {
   const wrap = el("div", "attachments");
+  // Missing files collapse into ONE muted chip (a message can reference
+  // dozens of long-gone paths; a wall of warnings buries the real content).
+  const missing = media.filter(a => !a.available);
+  if (missing.length) {
+    const c = el("button", "attach-chip missing", `🚫 ${missing.length} missing file${missing.length > 1 ? "s" : ""}`);
+    c.type = "button";
+    c.title = "Referenced files that no longer exist — click to list";
+    let open = false;
+    const detail = el("div", "attachments missing-list");
+    c.onclick = () => {
+      open = !open;
+      if (open) {
+        detail.replaceChildren();
+        for (const a of missing) { const x = el("span", "attach-chip missing", a.name); x.title = a.path; detail.append(x); }
+        wrap.after(detail);
+      } else detail.remove();
+    };
+    wrap.append(c);
+  }
   for (const a of media) {
+    if (!a.available) continue;
     const url = mediaUrl(a.path);
-    if (!a.available) { const c = el("span", "attach-chip missing", a.name + " (missing)"); c.title = a.path; wrap.append(c); continue; }
     if (a.kind === "image") {
       const link = el("a", "attach-img-link"); link.href = url; link.title = a.name; link.setAttribute("data-name", a.name);
       const img = el("img", "attach-img"); img.src = url; img.alt = a.name; img.loading = "lazy"; link.append(img);
@@ -534,14 +561,14 @@ function renderSourceChip() {
   const btn = $("source-btn");
   const s = state.source;
   if (!s || s.kind === "local") {
-    btn.textContent = "⌂ Viewing: Live Cursor data ▾";
+    btn.textContent = "⌂ Viewing: Live data ▾";
     btn.classList.remove("backup-src");
-    btn.title = "You are viewing your live ~/.cursor/projects";
+    btn.title = "You are viewing your live ~/.cursor/projects — click to open a backup";
   } else {
     const when = s.created_unix ? ` (${fmtDay(s.created_unix)})` : "";
-    btn.textContent = `🗄 Viewing: ${s.kind === "backup" ? "Backup" : "Folder"} — ${s.label}${when} ▾`;
+    btn.textContent = `🗄 Viewing: ${s.label}${when} ▾`;
     btn.classList.add("backup-src");
-    btn.title = `You are viewing: ${s.root}`;
+    btn.title = `You are viewing the ${s.kind === "backup" ? "backup" : "folder"} at ${s.root} — click to switch`;
   }
   // Backups are created from live data only.
   const bk = $("backup-btn");

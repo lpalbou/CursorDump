@@ -9,7 +9,9 @@ complete, Cursor-independent backups of your agent history.
 CursorDump is a single Rust binary that serves a local web UI (and a headless
 CLI) over the transcripts Cursor stores under `~/.cursor/projects/`. Access to
 that data is strictly read-only: running agent sessions are never altered,
-locked, or disturbed.
+locked, or disturbed. Works with the agent-transcript format of Cursor 2.x
+and 3.x (see the [FAQ](docs/faq.md#which-versions-of-cursor-does-it-work-with)
+for details).
 
 ## Capabilities
 

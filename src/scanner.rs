@@ -61,6 +61,17 @@ fn scan_sessions(project_dir: &Path, slug: &str) -> Vec<SessionMeta> {
     for entry in entries.flatten() {
         let session_dir = entry.path();
         if !session_dir.is_dir() {
+            // Older Cursor builds wrote transcripts FLAT:
+            // agent-transcripts/<session-id>.jsonl (no per-session directory).
+            if session_dir.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                let id = session_dir
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if let Some(meta) = session_meta(&session_dir, &id, slug, false, None) {
+                    sessions.push(meta);
+                }
+            }
             continue;
         }
         let id = entry.file_name().to_string_lossy().to_string();
@@ -167,6 +178,26 @@ fn decode_slug(slug: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scans_both_flat_and_nested_transcript_layouts() {
+        let base = std::env::temp_dir().join("cursordump-scan-layout-test");
+        let _ = fs::remove_dir_all(&base);
+        let t = base.join("proj/agent-transcripts");
+        let rec = r#"{"role":"user","message":{"content":[{"type":"text","text":"<user_query>hi</user_query>"}]}}"#;
+        // Nested (current Cursor): <id>/<id>.jsonl
+        fs::create_dir_all(t.join("aaa")).unwrap();
+        fs::write(t.join("aaa/aaa.jsonl"), format!("{rec}\n")).unwrap();
+        // Flat (older Cursor builds): <id>.jsonl
+        fs::write(t.join("bbb.jsonl"), format!("{rec}\n")).unwrap();
+
+        let projects = scan_projects(&base);
+        let sessions = &projects[0].sessions;
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"aaa"), "nested layout scanned: {ids:?}");
+        assert!(ids.contains(&"bbb"), "flat layout scanned: {ids:?}");
+        let _ = fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn decode_numeric_slug() {

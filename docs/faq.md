@@ -18,6 +18,23 @@ requires a per-run token, so other machines — and other local processes that
 don't have the token — cannot reach the API. Data leaves your machine only
 if you share an export or backup yourself.
 
+### Which versions of Cursor does it work with?
+
+CursorDump reads the on-disk agent transcripts Cursor stores at
+`~/.cursor/projects/<workspace>/agent-transcripts/` — the format used by
+Cursor 2.x and 3.x (verified against Cursor 3.8, and against real data
+written continuously since March 2026). Both transcript layouts are
+supported: the current per-session directories
+(`<id>/<id>.jsonl`, with `subagents/`) and the older flat files
+(`<id>.jsonl`). The parser is tolerant by design — unknown record and block
+types are skipped and counted, never fatal — so minor format additions in
+future Cursor releases degrade gracefully rather than break.
+
+Not covered: chats from Cursor versions predating the on-disk transcript
+system (they live only inside SQLite databases such as `state.vscdb`), and
+`cursor-agent` CLI sessions (stored separately in `~/.cursor/chats/` as
+SQLite).
+
 ### Can I use it without the web UI?
 
 Yes. `cursordump export …` and `cursordump backup …` run headlessly; see

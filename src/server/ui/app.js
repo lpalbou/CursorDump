@@ -525,13 +525,40 @@ function renderWelcome() {
   w.append(el("div", "logo", "◆"));
   w.append(el("h1", null, "CursorDump"));
   const steps = el("div", "steps");
-  const step = (n, t, d) => { const s = el("div", "step"); s.append(el("span", "n", n)); const tx = el("div"); tx.append(el("strong", null, t)); tx.append(el("small", null, d)); s.append(tx); return s; };
-  steps.append(step("🔍", "Find messages", "type a keyword and/or toggle the 🖼 media and 🔧 tool chips in the bar — results are the exact messages that match, with their attachments"));
-  steps.append(step("🗂", "Or browse", "pick a project (left) → a session (middle); that also scopes the finder to it"));
-  steps.append(step("⬇", "Export", "tick sessions and export SFT/CPT datasets"));
-  steps.append(step("🗄", "Backup", "a full, Cursor-independent copy of everything"));
+  const step = (n, t, d, onClick) => {
+    const s = el("button", "step");
+    s.type = "button";
+    s.append(el("span", "n", n));
+    const tx = el("div", "step-text");
+    tx.append(el("strong", null, t));
+    tx.append(el("small", null, d));
+    s.append(tx);
+    s.onclick = onClick;
+    return s;
+  };
+  steps.append(step("🔍", "Find messages",
+    "type a keyword and/or toggle the 🖼 media and 🔧 tool chips in the bar — results are the exact messages that match, with their attachments",
+    () => $("search-input").focus()));
+  steps.append(step("🗂", "Browse projects",
+    "pick a project (left) → a session (middle); that also scopes the finder to it",
+    () => { $("project-filter").focus(); pulse($("projects-pane")); }));
+  steps.append(step("⬇", "Export",
+    "tick sessions and export SFT/CPT datasets",
+    () => openExportDialog()));
+  steps.append(step("🗄", "Backup",
+    "a full, Cursor-independent copy of everything",
+    () => openBackupDialog()));
   w.append(steps);
   v.append(w);
+}
+
+/* Briefly highlight a pane to guide the eye after a welcome-step click. */
+function pulse(node) {
+  if (!node) return;
+  node.classList.remove("pulse");
+  void node.offsetWidth; // restart the animation
+  node.classList.add("pulse");
+  setTimeout(() => node.classList.remove("pulse"), 1200);
 }
 
 /* ---------------- export / backup (dialogs) ---------------- */

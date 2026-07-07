@@ -617,7 +617,7 @@ pub async fn find(
                 true
             })
             .collect();
-        matched.sort_by(|a, b| b.modified_unix.cmp(&a.modified_unix));
+        matched.sort_by_key(|e| std::cmp::Reverse(e.modified_unix));
         let total = matched.len();
         // One snapshot + one canonicalization for the whole result page.
         let ctx = MediaCtx::new(&state);

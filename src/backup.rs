@@ -529,7 +529,7 @@ fn collect_project_dirs(
         }
         dirs.push((slug, p));
     }
-    dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    dirs.sort_by_key(|d| d.0.clone());
     Ok(dirs)
 }
 

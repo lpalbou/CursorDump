@@ -88,7 +88,7 @@ fn scan_sessions(project_dir: &Path, slug: &str) -> Vec<SessionMeta> {
         }
     }
     // Newest first.
-    sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
     sessions
 }
 

@@ -307,7 +307,7 @@ pub fn run_export(
 
     // Deterministic order, then split train/val by session. Never let the
     // validation split consume the whole training set.
-    parsed.sort_by(|a, b| a.session.meta.modified.cmp(&b.session.meta.modified));
+    parsed.sort_by_key(|p| p.session.meta.modified);
     let mut val_count =
         ((parsed.len() as f32) * options.val_fraction.clamp(0.0, 0.5)).round() as usize;
     if val_count >= parsed.len() && !parsed.is_empty() {

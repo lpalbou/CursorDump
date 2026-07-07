@@ -80,7 +80,7 @@ cursordump /path/to/projects   # explore a custom root (e.g. a backup)
 ```
 
 Then, in the UI: pick a project (left), tick the sessions you want (middle),
-and press **⬇ Export…** or **🗄 Backup…** (top bar). See
+and press **⬇ Export for training…** or **🗄 Create backup…** (top bar). See
 [docs/getting-started.md](docs/getting-started.md) for a full first run.
 
 ## Headless CLI

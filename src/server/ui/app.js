@@ -21,6 +21,7 @@ const state = {
   allTools: [],            // tool names across all projects (for the dropdown)
   finder: { query: "", media: new Set(), tools: new Set() },
   lastResults: null,       // cached /api/find response for re-render
+  source: null,            // current data source descriptor {kind,label,root,created_unix}
 };
 
 /* API access token: delivered once in the opening URL (?token=…), then kept in
@@ -94,7 +95,9 @@ window.addEventListener("hashchange", () => { if (!applyingHash) applyHash(); })
 async function loadProjects() {
   const data = await api("/api/projects");
   state.projects = data.projects.filter(p => p.main_sessions + p.subagent_sessions > 0);
+  state.source = data.source || null;
   renderProjects();
+  renderSourceChip();
 }
 function projectName(slug) { const p = state.projects.find(p => p.slug === slug); return p ? p.display_name : slug; }
 
@@ -516,6 +519,117 @@ function fillHighlighted(node, text, term) {
   if (i < text.length) node.append(document.createTextNode(text.slice(i)));
 }
 
+/* ---------------- data source (local / backup) ---------------- */
+
+const RECENTS_KEY = "cd_recent_backups";
+const recentBackups = () => { try { return JSON.parse(localStorage.getItem(RECENTS_KEY)) || []; } catch { return []; } };
+function rememberBackup(path) {
+  const list = [path, ...recentBackups().filter(p => p !== path)].slice(0, 5);
+  localStorage.setItem(RECENTS_KEY, JSON.stringify(list));
+}
+
+const fmtDay = (u) => u ? new Date(u * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "";
+
+function renderSourceChip() {
+  const btn = $("source-btn");
+  const s = state.source;
+  if (!s || s.kind === "local") {
+    btn.textContent = "⌂ Viewing: Live Cursor data ▾";
+    btn.classList.remove("backup-src");
+    btn.title = "You are viewing your live ~/.cursor/projects";
+  } else {
+    const when = s.created_unix ? ` (${fmtDay(s.created_unix)})` : "";
+    btn.textContent = `🗄 Viewing: ${s.kind === "backup" ? "Backup" : "Folder"} — ${s.label}${when} ▾`;
+    btn.classList.add("backup-src");
+    btn.title = `You are viewing: ${s.root}`;
+  }
+  // Backups are created from live data only.
+  const bk = $("backup-btn");
+  const isLocal = !s || s.kind === "local";
+  bk.disabled = !isLocal;
+  bk.title = isLocal
+    ? "Save a full, verbatim copy of all Cursor data"
+    : "You're viewing a backup — backups are created from Live Cursor data. Switch source first (Viewing ▾).";
+}
+
+async function renderSourceMenu() {
+  const menu = $("source-menu");
+  menu.replaceChildren(el("div", "empty-note", "loading…"));
+  let info;
+  try { info = await api("/api/sources", { recents: recentBackups() }); }
+  catch (e) { menu.replaceChildren(el("div", "empty-note", e.message)); return; }
+  menu.replaceChildren();
+
+  const row = (icon, label, sub, current, onClick, unavailable) => {
+    const r = el("button", "tool-item source-item" + (current ? " current" : "") + (unavailable ? " unavailable" : ""));
+    r.type = "button";
+    r.append(el("span", null, (current ? "● " : "") + icon + " " + label));
+    if (sub) r.append(el("small", null, sub));
+    if (!current) r.onclick = onClick;
+    return r;
+  };
+
+  const cur = info.current;
+  menu.append(row("⌂", "Live Cursor data",
+    info.local ? (info.local.available ? "your current ~/.cursor sessions" : "no Cursor data found") : "not available on this machine",
+    cur.kind === "local",
+    () => switchSource({ kind: "local" }),
+    !info.local || !info.local.available));
+
+  if (info.recents.length) {
+    menu.append(el("div", "menu-sep", "Recent backups"));
+    for (const r of info.recents) {
+      if (cur.kind !== "local" && cur.root.startsWith(r.path)) {
+        menu.append(row("🗄", r.label, r.created_unix ? fmtDay(r.created_unix) : "", true));
+        continue;
+      }
+      menu.append(row("🗄", r.label,
+        r.available ? (r.created_unix ? fmtDay(r.created_unix) : "") : "⚠ not reachable",
+        false, () => switchSource({ path: r.path }), !r.available));
+    }
+  }
+  menu.append(el("div", "menu-sep", ""));
+  menu.append(row("📂", "Open backup…", "view sessions from a backup you made earlier", false,
+    () => { $("source-menu").hidden = true; openSourceDialog(); }));
+}
+
+function openSourceDialog() {
+  $("source-result").replaceChildren();
+  $("src-path").value = "";
+  $("source-dialog").showModal();
+  $("src-path").focus();
+}
+
+async function switchSource(body) {
+  if (state.selected.size > 0 &&
+      !confirm(`Switch source? Your selection (${state.selected.size} session(s)) will be cleared — sessions can't be selected across sources.`)) {
+    return;
+  }
+  const res = $("source-result");
+  try {
+    const r = await api("/api/source", body);
+    if (body.path) rememberBackup(body.path);
+    $("source-menu").hidden = true;
+    $("source-dialog").close();
+    // Full context reset: every piece of state is keyed by absolute paths
+    // under the OLD root; nothing survives a source switch.
+    state.activeProject = null; state.sessions = []; state.activeSession = null;
+    state.selected = new Set(); state.expandedParents = new Set();
+    state.allTools = []; state.lastResults = null;
+    state.finder = { query: "", media: new Set(), tools: new Set() };
+    $("search-input").value = "";
+    history.replaceState(null, "", location.pathname);
+    state.source = r.current;
+    await loadProjects();
+    renderSessions(); renderFinderBar(); renderSourceChip(); ensureTools();
+    renderWelcome();
+    updateSelectionSummary();
+  } catch (e) {
+    if (res && $("source-dialog").open) res.replaceChildren(el("div", "err", "✖ " + e.message));
+    else alert("Switch failed: " + e.message);
+  }
+}
+
 /* ---------------- welcome ---------------- */
 
 function renderWelcome() {
@@ -524,6 +638,27 @@ function renderWelcome() {
   const w = el("div", "welcome");
   w.append(el("div", "logo", "◆"));
   w.append(el("h1", null, "CursorDump"));
+
+  // Context line: which source is this?
+  const s = state.source;
+  if (s && s.kind !== "local") {
+    const when = s.created_unix ? ` — created ${fmtDay(s.created_unix)}` : "";
+    w.append(el("p", "source-note backup", `Viewing ${s.kind === "backup" ? "backup" : "folder"}: ${s.label}${when} · ${state.projects.length} project(s) · read-only`));
+  }
+
+  // No local data and nothing loaded: the welcome screen becomes the picker.
+  if (state.projects.length === 0 && (!s || s.kind === "local")) {
+    w.append(el("p", "source-note", "No Cursor data found at ~/.cursor/projects."));
+    w.append(el("p", "muted", "If Cursor isn't installed on this machine, you can still explore a backup."));
+    const open = el("button", "btn primary", "📂 Open a backup…");
+    open.type = "button";
+    open.onclick = openSourceDialog;
+    w.append(open);
+    w.append(el("p", "muted small", "Recent backups appear in the source menu (top left) once you've opened one."));
+    v.append(w);
+    return;
+  }
+
   const steps = el("div", "steps");
   const step = (n, t, d, onClick) => {
     const s = el("button", "step");
@@ -542,12 +677,15 @@ function renderWelcome() {
   steps.append(step("🗂", "Browse projects",
     "pick a project (left) → a session (middle); that also scopes the finder to it",
     () => { $("project-filter").focus(); pulse($("projects-pane")); }));
-  steps.append(step("⬇", "Export",
-    "tick sessions and export SFT/CPT datasets",
+  steps.append(step("⬇", "Export for training",
+    "turn ticked sessions into SFT/CPT fine-tuning datasets",
     () => openExportDialog()));
-  steps.append(step("🗄", "Backup",
-    "a full, Cursor-independent copy of everything",
+  steps.append(step("🗄", "Create a backup",
+    "save a complete copy of every session — browse it again later, even without Cursor",
     () => openBackupDialog()));
+  steps.append(step("📂", "Open a backup",
+    "view sessions from a backup you made earlier (read-only)",
+    () => openSourceDialog()));
   w.append(steps);
   v.append(w);
 }
@@ -654,6 +792,11 @@ $("finder-clear").onclick = () => {
 };
 $("tools-btn").onclick = () => { const m = $("tools-menu"); m.hidden = !m.hidden; if (!m.hidden) { ensureTools(); renderToolsMenu(); } };
 document.addEventListener("click", (e) => { if (!e.target.closest(".tools-dd")) $("tools-menu").hidden = true; });
+$("source-btn").onclick = () => { const m = $("source-menu"); m.hidden = !m.hidden; if (!m.hidden) renderSourceMenu(); };
+document.addEventListener("click", (e) => { if (!e.target.closest(".source-dd")) $("source-menu").hidden = true; });
+$("do-open-source").onclick = () => { const p = $("src-path").value.trim(); if (p) switchSource({ path: p }); };
+$("src-path").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("do-open-source").click(); } });
+$("close-source").onclick = () => $("source-dialog").close();
 $("rescan-btn").onclick = async () => { await api("/api/rescan", {}); state.allTools = []; await loadProjects(); if (state.activeProject) selectProject(state.activeProject, false); };
 $("select-all-btn").onclick = () => { for (const s of (state._visible || [])) state.selected.add(s.path); renderSessions(); };
 $("clear-proj-btn").onclick = () => { for (const s of state.sessions) state.selected.delete(s.path); renderSessions(); };

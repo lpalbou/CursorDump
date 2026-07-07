@@ -9,6 +9,10 @@
 <body>
 <header id="topbar">
   <div class="brand">◆ CursorDump</div>
+  <div class="source-dd">
+    <button id="source-btn" class="btn" type="button" title="What you are viewing">⌂ Viewing: Live Cursor data ▾</button>
+    <div id="source-menu" class="tools-menu" hidden></div>
+  </div>
   <div class="finder">
     <input id="search-input" type="search" placeholder="Find in messages…  (/ to focus)">
     <span class="finder-facets" id="media-chips"></span>
@@ -22,8 +26,8 @@
   </div>
   <div class="grow"></div>
   <div id="selection-summary" class="muted">0 selected</div>
-  <button id="export-btn" class="btn primary" disabled>⬇ Export…</button>
-  <button id="backup-btn" class="btn" title="Full verbatim backup of all Cursor projects">🗄 Backup…</button>
+  <button id="export-btn" class="btn primary" disabled>⬇ Export for training…</button>
+  <button id="backup-btn" class="btn" title="Save a full, verbatim copy of all Cursor data">🗄 Create backup…</button>
   <span class="readonly" title="CursorDump never writes to ~/.cursor">🔒 read-only</span>
 </header>
 
@@ -56,7 +60,9 @@
 
 <dialog id="export-dialog">
   <form method="dialog" id="export-form">
-    <h2>Export dataset</h2>
+    <h2>⬇ Export for training</h2>
+    <p class="muted">Turns the ticked sessions into SFT/CPT datasets for fine-tuning.
+      To save a complete browsable copy of your data instead, use <strong>Create backup</strong>.</p>
     <p id="export-count" class="muted"></p>
 
     <div class="presets">
@@ -122,12 +128,32 @@
   </form>
 </dialog>
 
+<dialog id="source-dialog">
+  <form method="dialog">
+    <h2>📂 Open a backup</h2>
+    <p class="muted">Paste the path to a CursorDump backup folder — the one containing
+      <code>cursordump-backup.json</code>. Pointing at its <code>projects/</code> subfolder works too.
+      Opening is read-only; nothing is restored or modified.</p>
+    <div class="outrow">
+      <span class="lbl">Backup folder</span>
+      <input id="src-path" type="text" spellcheck="false" placeholder="/Volumes/T7/cursordump-backup">
+    </div>
+    <p class="muted small">Tip: drag the folder from Finder into a terminal to get its path, then paste it here.</p>
+    <div id="source-result"></div>
+    <div class="dialog-actions">
+      <button type="button" id="do-open-source" class="btn primary">Open</button>
+      <button type="button" id="close-source" class="btn">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="backup-dialog">
   <form method="dialog" id="backup-form">
-    <h2>🗄 Full backup</h2>
-    <p class="muted">A verbatim copy of your Cursor projects — every transcript, subagent,
+    <h2>🗄 Create a backup</h2>
+    <p class="muted">Saves a verbatim copy of your Cursor projects — every transcript, subagent,
       asset, upload, canvas and terminal — so nothing is lost if Cursor flushes its data.
-      Re-running into the same folder is incremental (only changed files are copied).</p>
+      Re-running into the same folder is incremental (only changed files are copied).
+      You can open the copy later with <strong>Viewing ▾ → Open backup</strong>, even without Cursor installed.</p>
 
     <fieldset>
       <legend>Scope</legend>
@@ -151,7 +177,7 @@
     <div id="backup-result"></div>
 
     <div class="dialog-actions">
-      <button type="button" id="do-backup" class="btn primary">🗄 Back up</button>
+      <button type="button" id="do-backup" class="btn primary">🗄 Create backup</button>
       <button type="button" id="close-backup" class="btn">Close</button>
     </div>
   </form>

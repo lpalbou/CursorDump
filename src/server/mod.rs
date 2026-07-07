@@ -51,22 +51,45 @@ pub struct MsgEntry {
     pub modified_unix: u64,
 }
 
-/// Shared application state.
-pub struct AppState {
+/// What kind of data source is being explored.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SourceKind {
+    /// The live `~/.cursor/projects` of this machine.
+    Local,
+    /// A CursorDump backup (directory with a `cursordump-backup.json` marker).
+    Backup,
+    /// A bare projects directory passed on the command line.
+    PlainDir,
+}
+
+impl SourceKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SourceKind::Local => "local",
+            SourceKind::Backup => "backup",
+            SourceKind::PlainDir => "dir",
+        }
+    }
+}
+
+/// One data source and every cache derived from it. Swapping sources swaps
+/// the WHOLE struct behind `AppState.current`, so a request that snapshots
+/// its `Source` once can never observe a torn mix of old root + new caches.
+pub struct Source {
+    pub kind: SourceKind,
+    /// The projects root being scanned.
     pub root: PathBuf,
+    /// Parent of `root` — media boundary + backup `attachments/` location.
     pub cursor_root: PathBuf,
-    /// Random per-run token required on every `/api/*` request. The browser
-    /// receives it via the opened URL; other local processes that cannot read
-    /// that URL cannot call the API (defends the "local, read-only" posture
-    /// beyond the loopback + Host guard).
-    pub token: String,
+    /// Display name (folder name for backups, "Local Cursor" for local).
+    pub label: String,
+    /// Backup creation time from the manifest (backups only).
+    pub created_unix: Option<u64>,
     /// Cached scan; refreshed via /api/rescan.
     pub projects: RwLock<Vec<Project>>,
-    /// Lazily computed per-project facets (tools/media per session), keyed by
-    /// project slug. Cleared on rescan.
+    /// Lazily computed per-project facets, keyed by project slug.
     pub facets: RwLock<std::collections::HashMap<String, Vec<SessionFacet>>>,
-    /// Lazily built message-level index for the unified finder. Cleared on
-    /// rescan; built on first find.
+    /// Lazily built message-level index for the unified finder.
     pub message_index: RwLock<Option<Arc<Vec<MsgEntry>>>>,
     /// Bumped on every rescan. A build that started before a rescan must not
     /// store its (stale) result over the cleared slot.
@@ -76,7 +99,32 @@ pub struct AppState {
     pub index_build: std::sync::Mutex<()>,
 }
 
-impl AppState {
+impl Source {
+    /// Build a source and run its initial scan.
+    pub fn create(
+        kind: SourceKind,
+        root: PathBuf,
+        label: String,
+        created_unix: Option<u64>,
+    ) -> Self {
+        let cursor_root = root
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| root.clone());
+        Self {
+            kind,
+            cursor_root,
+            label,
+            created_unix,
+            projects: RwLock::new(crate::scanner::scan_projects(&root)),
+            facets: RwLock::new(std::collections::HashMap::new()),
+            message_index: RwLock::new(None),
+            index_gen: std::sync::atomic::AtomicU64::new(0),
+            index_build: std::sync::Mutex::new(()),
+            root,
+        }
+    }
+
     /// Snapshot the cached projects, recovering from lock poisoning rather
     /// than propagating a panic that would brick every endpoint.
     pub fn projects_snapshot(&self) -> Vec<Project> {
@@ -137,6 +185,40 @@ impl AppState {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(slug.to_string(), facets);
+    }
+}
+
+/// Shared application state.
+pub struct AppState {
+    /// Random per-run token required on every `/api/*` request. The browser
+    /// receives it via the opened URL; other local processes that cannot read
+    /// that URL cannot call the API (defends the "local, read-only" posture
+    /// beyond the loopback + Host guard).
+    pub token: String,
+    /// The REAL `~/.cursor` of this machine, pinned at boot. Export and
+    /// backup destination guards ALWAYS protect this directory, no matter
+    /// which source is currently being explored (switching to a backup must
+    /// not silently drop the write-refusal for the live Cursor data).
+    pub real_cursor_root: PathBuf,
+    /// The local projects root detected at boot (None on machines without
+    /// Cursor data). This is the only non-backup root `/api/source` accepts.
+    pub local_root: Option<PathBuf>,
+    /// The source currently being explored.
+    pub current: RwLock<Arc<Source>>,
+}
+
+impl AppState {
+    /// Atomic snapshot of the current source. Take it ONCE per request; all
+    /// reads through the same `Arc<Source>` are mutually consistent.
+    pub fn source(&self) -> Arc<Source> {
+        self.current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn swap_source(&self, source: Arc<Source>) {
+        *self.current.write().unwrap_or_else(|e| e.into_inner()) = source;
     }
 }
 
@@ -227,21 +309,51 @@ const APP_CSS: &str = include_str!("ui/app.css");
 const APP_JS: &str = include_str!("ui/app.js");
 
 /// Start the server (blocking). Opens the browser once the port is bound.
+///
+/// `root` is the projects root to explore first; when it belongs to a backup
+/// (marker present) the source is created in Backup mode with its hardened
+/// media rules.
 pub fn run(root: PathBuf, port: u16, open_browser: bool) -> anyhow::Result<()> {
-    let cursor_root = root
-        .parent()
+    let local_root = crate::scanner::default_root().filter(|r| r.is_dir());
+    let real_cursor_root = local_root
+        .as_deref()
+        .and_then(|r| r.parent())
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| root.clone());
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .map(|h| h.join(".cursor"))
+                .unwrap_or_else(|| root.clone())
+        });
+
+    // Classify the launch root: local, backup (marker), or plain dir.
+    let source = if Some(&root) == local_root.as_ref() {
+        Source::create(SourceKind::Local, root, "Local Cursor".into(), None)
+    } else {
+        match crate::backup::resolve_source_path(&root, true) {
+            Ok(r) => Source::create(
+                if r.is_backup {
+                    SourceKind::Backup
+                } else {
+                    SourceKind::PlainDir
+                },
+                r.projects_root,
+                r.label,
+                r.created_unix,
+            ),
+            Err(_) => Source::create(
+                SourceKind::PlainDir,
+                root.clone(),
+                root.display().to_string(),
+                None,
+            ),
+        }
+    };
 
     let state: SharedState = Arc::new(AppState {
-        projects: RwLock::new(crate::scanner::scan_projects(&root)),
-        facets: RwLock::new(std::collections::HashMap::new()),
-        message_index: RwLock::new(None),
-        index_gen: std::sync::atomic::AtomicU64::new(0),
-        index_build: std::sync::Mutex::new(()),
         token: generate_token(),
-        root,
-        cursor_root,
+        real_cursor_root,
+        local_root,
+        current: RwLock::new(Arc::new(source)),
     });
 
     let app = Router::new()
@@ -270,6 +382,8 @@ pub fn run(root: PathBuf, port: u16, open_browser: bool) -> anyhow::Result<()> {
         .route("/api/backup", post(api::backup))
         .route("/api/default_out_dir", get(api::default_out_dir))
         .route("/api/default_backup_dir", get(api::default_backup_dir))
+        .route("/api/sources", post(api::sources))
+        .route("/api/source", post(api::set_source))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state.clone());
 

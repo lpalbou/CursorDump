@@ -103,9 +103,20 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let root = root_arg
-        .or_else(scanner::default_root)
-        .expect("cannot determine ~/.cursor/projects; pass a path as argument");
+    // A positional path may be a backup ROOT (containing
+    // cursordump-backup.json), its projects/ subdir, or any projects dir —
+    // resolve so `./cursordump .` works from inside a backup.
+    let root = match root_arg {
+        Some(p) => match cursordump::backup::resolve_source_path(&p, true) {
+            Ok(r) => r.projects_root,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        },
+        None => scanner::default_root()
+            .expect("cannot determine ~/.cursor/projects; pass a path as argument"),
+    };
     server::run(root, port, open_browser)
 }
 

@@ -36,8 +36,19 @@ fn session_json(s: &SessionMeta) -> Value {
 
 // ---------------------------------------------------------------- projects
 
+/// Descriptor of the currently explored source (for the UI's source chip).
+fn source_descriptor(src: &crate::server::Source) -> Value {
+    json!({
+        "kind": src.kind.label(),
+        "root": src.root.display().to_string(),
+        "label": src.label,
+        "created_unix": src.created_unix,
+    })
+}
+
 pub async fn projects(State(state): State<SharedState>) -> Json<Value> {
-    let projects = state.projects_snapshot();
+    let src = state.source();
+    let projects = src.projects_snapshot();
     let list: Vec<Value> = projects
         .iter()
         .map(|p| {
@@ -51,16 +62,21 @@ pub async fn projects(State(state): State<SharedState>) -> Json<Value> {
             })
         })
         .collect();
-    Json(json!({ "projects": list, "root": state.root.display().to_string() }))
+    Json(json!({
+        "projects": list,
+        "root": src.root.display().to_string(),
+        "source": source_descriptor(&src),
+    }))
 }
 
 pub async fn rescan(State(state): State<SharedState>) -> Json<Value> {
-    let root = state.root.clone();
+    let src = state.source();
+    let root = src.root.clone();
     let fresh = tokio::task::spawn_blocking(move || scanner::scan_projects(&root))
         .await
         .unwrap_or_default();
     let n = fresh.len();
-    state.set_projects(fresh);
+    src.set_projects(fresh);
     Json(json!({ "ok": true, "projects": n }))
 }
 
@@ -75,7 +91,7 @@ pub async fn sessions(
     State(state): State<SharedState>,
     Query(q): Query<SessionsQuery>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let projects = state.projects_snapshot();
+    let projects = state.source().projects_snapshot();
     let project = projects
         .iter()
         .find(|p| p.slug == q.project)
@@ -98,11 +114,12 @@ pub async fn facets(
     State(state): State<SharedState>,
     Query(q): Query<FacetsQuery>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let src = state.source();
     let key = q.project.clone().unwrap_or_else(|| "*".to_string());
-    if let Some(cached) = state.cached_facets(&key) {
+    if let Some(cached) = src.cached_facets(&key) {
         return Ok(Json(facets_json(&cached)));
     }
-    let projects = state.projects_snapshot();
+    let projects = src.projects_snapshot();
     let sessions: Vec<SessionMeta> = match &q.project {
         Some(slug) => projects
             .iter()
@@ -115,7 +132,7 @@ pub async fn facets(
             .flat_map(|p| p.sessions.iter().cloned())
             .collect(),
     };
-    let boundary = crate::export::media_boundary(&state.cursor_root);
+    let boundary = crate::export::media_boundary(&src.cursor_root);
 
     let computed = tokio::task::spawn_blocking(move || {
         sessions
@@ -145,7 +162,7 @@ pub async fn facets(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    state.store_facets(&key, computed.clone());
+    src.store_facets(&key, computed.clone());
     Ok(Json(facets_json(&computed)))
 }
 
@@ -180,28 +197,34 @@ pub struct SessionQuery {
 
 /// Resolve a client-supplied transcript path to a known scanned session.
 /// Only paths the scanner itself produced are served — the browser can never
-/// use this endpoint to read arbitrary files.
-fn find_session(state: &SharedState, path: &str) -> Option<SessionMeta> {
+/// use this endpoint to read arbitrary files. The path must additionally
+/// canonicalize INSIDE the source root: a symlinked `.jsonl` planted in a
+/// hostile backup must not read files outside it.
+fn find_session(src: &crate::server::Source, path: &str) -> Option<SessionMeta> {
     let path = PathBuf::from(path);
-    state
+    let meta = src
         .projects_snapshot()
         .iter()
         .flat_map(|p| p.sessions.iter())
         .find(|s| s.path == path)
-        .cloned()
+        .cloned()?;
+    let root = src.root.canonicalize().ok()?;
+    let real = meta.path.canonicalize().ok()?;
+    real.starts_with(&root).then_some(meta)
 }
 
 pub async fn session(
     State(state): State<SharedState>,
     Query(q): Query<SessionQuery>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let src = state.source();
     let meta =
-        find_session(&state, &q.path).ok_or((StatusCode::NOT_FOUND, "unknown session".into()))?;
+        find_session(&src, &q.path).ok_or((StatusCode::NOT_FOUND, "unknown session".into()))?;
     let parsed = tokio::task::spawn_blocking(move || parser::parse_session(&meta))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let boundary = crate::export::media_boundary(&state.cursor_root);
+    let boundary = crate::export::media_boundary(&src.cursor_root);
     let messages: Vec<Value> = parsed
         .messages
         .iter()
@@ -228,7 +251,7 @@ pub async fn session(
                 crate::media::extract_refs_from_text(&full, &boundary)
                     .into_iter()
                     .map(|r| {
-                        let resolved = resolve_media_path(&state, &r.path).is_some();
+                        let resolved = resolve_media_path(&src, &r.path).is_some();
                         json!({
                             "path": r.path.display().to_string(),
                             "name": r.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
@@ -276,8 +299,8 @@ pub async fn session(
 ///
 /// The resolved path MUST canonicalize inside the scanned root or the cursor
 /// projects boundary — this endpoint can never serve arbitrary files.
-fn resolve_media_path(state: &SharedState, requested: &Path) -> Option<PathBuf> {
-    resolve_media_path_ctx(&MediaCtx::new(state), requested)
+fn resolve_media_path(src: &crate::server::Source, requested: &Path) -> Option<PathBuf> {
+    resolve_media_path_ctx(&MediaCtx::new(src), requested)
 }
 
 /// Precomputed resolution context so bulk callers (the finder maps hundreds of
@@ -290,21 +313,27 @@ struct MediaCtx {
     boundary: PathBuf,
     slugs: Vec<String>,
     index: std::sync::Arc<Vec<MsgEntry>>,
+    /// Whether transcript-referenced EXTERNAL paths may be served (case 1b).
+    /// Only true for the live local source: a hostile backup could plant
+    /// references to arbitrary local files in its transcripts, so in Backup/
+    /// PlainDir mode only the mirror and captured attachments are served.
+    allow_external_refs: bool,
 }
 
 impl MediaCtx {
-    fn new(state: &SharedState) -> Self {
-        let boundary = crate::export::media_boundary(&state.cursor_root);
+    fn new(src: &crate::server::Source) -> Self {
+        let boundary = crate::export::media_boundary(&src.cursor_root);
         Self {
-            root: state.root.canonicalize().ok(),
-            scan_root: state.root.clone(),
+            root: src.root.canonicalize().ok(),
+            scan_root: src.root.clone(),
             boundary: boundary.canonicalize().unwrap_or(boundary),
-            slugs: state
+            slugs: src
                 .projects_snapshot()
                 .iter()
                 .map(|p| p.slug.clone())
                 .collect(),
-            index: message_index(state),
+            index: message_index(src),
+            allow_external_refs: src.kind == crate::server::SourceKind::Local,
         }
     }
 }
@@ -326,7 +355,9 @@ fn resolve_media_path_ctx(ctx: &MediaCtx, requested: &Path) -> Option<PathBuf> {
     // indexed message ACTUALLY references this exact path — this bounds the
     // endpoint to attachments the user's own sessions mention, so it can never
     // be used to read arbitrary media-extension files elsewhere on disk.
-    if requested.is_file() && path_is_referenced(ctx, requested) {
+    // DISABLED for backup/plain-dir sources: their transcripts are untrusted
+    // input and could reference any local file.
+    if ctx.allow_external_refs && requested.is_file() && path_is_referenced(ctx, requested) {
         if let Ok(c) = requested.canonicalize() {
             return Some(c);
         }
@@ -428,7 +459,7 @@ pub async fn media(
     ) {
         return Err((StatusCode::FORBIDDEN, "not a media file".into()));
     }
-    let resolved = resolve_media_path(&state, &requested)
+    let resolved = resolve_media_path(&state.source(), &requested)
         .ok_or((StatusCode::NOT_FOUND, "attachment not found".into()))?;
     // Stream instead of buffering: session videos can be hundreds of MB and a
     // few parallel <video> tags must not hold whole files in memory.
@@ -462,23 +493,23 @@ pub async fn media(
 
 /// Public entry point to warm the index at startup.
 pub fn build_message_index(state: &SharedState) {
-    let _ = message_index(state);
+    let _ = message_index(&state.source());
 }
 
 /// Build (or reuse) the message-level index: one entry per message with its
 /// tools, attached media and a short snippet — but no full text (kept small).
-fn message_index(state: &SharedState) -> std::sync::Arc<Vec<MsgEntry>> {
-    if let Some(idx) = state.cached_index() {
+fn message_index(src: &crate::server::Source) -> std::sync::Arc<Vec<MsgEntry>> {
+    if let Some(idx) = src.cached_index() {
         return idx;
     }
     // Serialize builds: a second caller waits here, then finds the cache warm.
-    let _build = state.index_build.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(idx) = state.cached_index() {
+    let _build = src.index_build.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(idx) = src.cached_index() {
         return idx;
     }
-    let gen = state.current_index_gen();
-    let boundary = crate::export::media_boundary(&state.cursor_root);
-    let projects = state.projects_snapshot();
+    let gen = src.current_index_gen();
+    let boundary = crate::export::media_boundary(&src.cursor_root);
+    let projects = src.projects_snapshot();
     let mut entries: Vec<MsgEntry> = Vec::new();
     for p in &projects {
         for s in &p.sessions {
@@ -545,7 +576,7 @@ fn message_index(state: &SharedState) -> std::sync::Arc<Vec<MsgEntry>> {
     }
     let arc = std::sync::Arc::new(entries);
     // Only cache if no rescan invalidated this build while it ran.
-    state.store_index_if_current(arc.clone(), gen);
+    src.store_index_if_current(arc.clone(), gen);
     arc
 }
 
@@ -581,10 +612,12 @@ pub async fn find(
     let project = body.project.clone();
 
     let (results, total) = tokio::task::spawn_blocking(move || {
+        // One atomic source snapshot for the whole request.
+        let src = state.source();
         // Keyword hit set: ALL (session_path, line_index) matches, uncapped so
         // combining keyword with media/tool filters isn't truncated early.
         let kw_hits: Option<std::collections::HashSet<(String, usize)>> = if has_kw {
-            let projects = state.projects_snapshot();
+            let projects = src.projects_snapshot();
             let set = crate::search::collect_keyword_hits(&projects, &query)
                 .into_iter()
                 .map(|(p, i)| (p.display().to_string(), i))
@@ -594,7 +627,7 @@ pub async fn find(
             None
         };
 
-        let index = message_index(&state);
+        let index = message_index(&src);
         let mut matched: Vec<&MsgEntry> = index
             .iter()
             .filter(|e| {
@@ -620,8 +653,8 @@ pub async fn find(
         matched.sort_by_key(|e| std::cmp::Reverse(e.modified_unix));
         let total = matched.len();
         // One snapshot + one canonicalization for the whole result page.
-        let ctx = MediaCtx::new(&state);
-        let names: std::collections::HashMap<String, String> = state
+        let ctx = MediaCtx::new(&src);
+        let names: std::collections::HashMap<String, String> = src
             .projects_snapshot()
             .into_iter()
             .map(|p| (p.slug, p.display_name))
@@ -745,10 +778,11 @@ pub async fn export(
     State(state): State<SharedState>,
     Json(body): Json<ExportBody>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let src = state.source();
     let sessions: Vec<SessionMeta> = body
         .paths
         .iter()
-        .filter_map(|p| find_session(&state, p))
+        .filter_map(|p| find_session(&src, p))
         .collect();
     if sessions.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "no valid sessions selected".into()));
@@ -756,6 +790,10 @@ pub async fn export(
     let selected_total = sessions.len();
     let selected_subagents = sessions.iter().filter(|s| s.is_subagent).count();
     let out_dir = PathBuf::from(shellexpand_home(&body.out_dir));
+    // The write-refusal must ALWAYS protect the real ~/.cursor of this
+    // machine, even while exploring a backup (whose cursor_root differs).
+    export::validate_out_dir(&out_dir, &state.real_cursor_root)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let mut options = body.options.to_options();
     // If the user explicitly ticked subagent transcripts, honor that: keep
     // them in the record set even in Inline mode (otherwise selecting only a
@@ -763,7 +801,7 @@ pub async fn export(
     if sessions.iter().any(|s| s.is_subagent) {
         options.include_subagent_sessions = true;
     }
-    let cursor_root = state.cursor_root.clone();
+    let cursor_root = src.cursor_root.clone();
 
     let result = tokio::task::spawn_blocking(move || {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -830,7 +868,18 @@ pub async fn backup(
     State(state): State<SharedState>,
     Json(body): Json<BackupBody>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let src = state.source();
+    // Backups are made from LIVE Cursor data; backing up a backup only
+    // produces a confusing nested copy (the UI disables the button too).
+    if src.kind != crate::server::SourceKind::Local {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Backups are made from live Cursor data — switch to Local Cursor first.".into(),
+        ));
+    }
     let out_dir = PathBuf::from(shellexpand_home(&body.out_dir));
+    backup::validate_backup_dir(&out_dir, &state.real_cursor_root)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let options = BackupOptions {
         projects: if body.projects.is_empty() {
             None
@@ -842,8 +891,8 @@ pub async fn backup(
         include_app: body.include_app,
         include_external_attachments: body.include_external_attachments,
     };
-    let root = state.root.clone();
-    let cursor_root = state.cursor_root.clone();
+    let root = src.root.clone();
+    let cursor_root = src.cursor_root.clone();
 
     let result = tokio::task::spawn_blocking(move || {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -912,4 +961,195 @@ fn shellexpand_home(p: &str) -> String {
         }
     }
     p.to_string()
+}
+
+// ------------------------------------------------------------------- source
+
+#[derive(Deserialize, Default)]
+pub struct SourcesBody {
+    /// Recent backup paths remembered by the frontend (localStorage); the
+    /// server validates each and returns descriptors for the menu.
+    #[serde(default)]
+    pub recents: Vec<String>,
+}
+
+/// Current source + local availability + validated recents, for the source
+/// switcher menu.
+pub async fn sources(
+    State(state): State<SharedState>,
+    Json(body): Json<SourcesBody>,
+) -> Json<Value> {
+    let src = state.source();
+    let local = state.local_root.as_ref().map(|r| {
+        json!({
+            "path": r.display().to_string(),
+            "available": r.is_dir(),
+        })
+    });
+    let recents: Vec<Value> = body
+        .recents
+        .iter()
+        .take(8)
+        .map(
+            |p| match crate::backup::resolve_source_path(Path::new(p), false) {
+                Ok(r) => json!({
+                    "path": p,
+                    "label": r.label,
+                    "created_unix": r.created_unix,
+                    "available": true,
+                }),
+                Err(_) => json!({ "path": p, "label": Path::new(p).file_name()
+                    .map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.clone()),
+                    "created_unix": null, "available": false }),
+            },
+        )
+        .collect();
+    Json(json!({
+        "current": source_descriptor(&src),
+        "local": local,
+        "recents": recents,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct SetSourceBody {
+    /// "local" to return to the live Cursor data; otherwise `path` is used.
+    pub kind: Option<String>,
+    pub path: Option<String>,
+}
+
+/// Switch the explored source. Only two kinds of root are accepted:
+/// the boot-detected local projects root, and marker-verified CursorDump
+/// backups — never arbitrary directories (this endpoint must not become a
+/// generic filesystem browser).
+pub async fn set_source(
+    State(state): State<SharedState>,
+    Json(body): Json<SetSourceBody>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    use crate::server::{Source, SourceKind};
+    let new_source = if body.kind.as_deref() == Some("local") {
+        let root = state.local_root.clone().ok_or((
+            StatusCode::BAD_REQUEST,
+            "No Cursor data found at ~/.cursor/projects on this machine.".to_string(),
+        ))?;
+        tokio::task::spawn_blocking(move || {
+            Source::create(SourceKind::Local, root, "Local Cursor".into(), None)
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        let path = body.path.as_deref().unwrap_or("").trim().to_string();
+        if path.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "missing path".into()));
+        }
+        let resolved =
+            crate::backup::resolve_source_path(Path::new(&shellexpand_home(&path)), false)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        tokio::task::spawn_blocking(move || {
+            Source::create(
+                SourceKind::Backup,
+                resolved.projects_root,
+                resolved.label,
+                resolved.created_unix,
+            )
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    let descriptor = {
+        let src = std::sync::Arc::new(new_source);
+        state.swap_source(src.clone());
+        // Warm the finder index for the new source in the background.
+        let st = state.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = message_index(&st.source());
+        });
+        source_descriptor(&src)
+    };
+    Ok(Json(json!({ "ok": true, "current": descriptor })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::{Source, SourceKind};
+
+    fn write(p: &Path, content: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, content).unwrap();
+    }
+
+    /// A hostile backup can reference ANY local file in its transcripts; the
+    /// media resolver must refuse to serve such external paths in Backup mode
+    /// while still serving them for the live Local source.
+    #[test]
+    fn external_referenced_media_gated_by_source_kind() {
+        let base = std::env::temp_dir().join("cursordump-hostile-backup-test");
+        let _ = std::fs::remove_dir_all(&base);
+
+        // A "secret" file elsewhere on disk that the hostile transcript
+        // references as if it were a user attachment.
+        let secret = base.join("elsewhere/secret.png");
+        write(&secret, "SECRET-PNG");
+
+        // Projects tree whose transcript references the secret.
+        let root = base.join("projects");
+        let rec = serde_json::json!({"role":"user","message":{"content":[
+            {"type":"text","text": format!("<user_query>see {}</user_query>", secret.display())}
+        ]}})
+        .to_string();
+        write(
+            &root.join("p/agent-transcripts/s/s.jsonl"),
+            &format!("{rec}\n"),
+        );
+
+        // Same tree explored as a BACKUP: external reference must NOT resolve.
+        let backup_src = Source::create(SourceKind::Backup, root.clone(), "bk".into(), None);
+        assert!(
+            resolve_media_path(&backup_src, &secret).is_none(),
+            "hostile backup must not serve external files"
+        );
+
+        // Explored as the LOCAL source: the user's own referenced attachment
+        // resolves (existing behavior for workspace @files).
+        let local_src = Source::create(SourceKind::Local, root, "Local Cursor".into(), None);
+        assert_eq!(
+            resolve_media_path(&local_src, &secret),
+            secret.canonicalize().ok(),
+            "local source serves message-referenced attachments"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A symlinked transcript planted in a backup must not be readable via
+    /// /api/session: the scanner lists it, but resolution requires the real
+    /// file to live inside the source root.
+    #[cfg(unix)]
+    #[test]
+    fn session_lookup_rejects_symlink_escape() {
+        let base = std::env::temp_dir().join("cursordump-symlink-session-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let outside = base.join("outside/real.jsonl");
+        write(&outside, "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"<user_query>x</user_query>\"}]}}\n");
+        let root = base.join("projects");
+        let dir = root.join("p/agent-transcripts/s");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("s.jsonl")).unwrap();
+
+        let src = Source::create(SourceKind::Backup, root, "bk".into(), None);
+        // The scanner may list the symlinked transcript…
+        if let Some(meta) = src
+            .projects_snapshot()
+            .iter()
+            .flat_map(|p| p.sessions.iter())
+            .next()
+        {
+            // …but find_session must refuse it (canonicalizes outside root).
+            assert!(
+                find_session(&src, &meta.path.display().to_string()).is_none(),
+                "symlink escape must be rejected"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

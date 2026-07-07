@@ -68,7 +68,8 @@ are never modified, locked, or disturbed.
 The page has three panels plus a top bar:
 
 - **Top bar** — the unified finder (keyword, media chips, tools dropdown),
-  the live "N selected" count, **⬇ Export…**, **🗄 Backup…**, and a
+  the **Viewing** source chip (live Cursor data or an opened backup), the
+  live "N selected" count, **⬇ Export for training…**, **🗄 Create backup…**, and a
   "🔒 read-only" reminder.
 - **Projects** (left) — every project, most recently active first. Each row
   shows two chips: blue = main sessions, amber = subagent transcripts. Click
@@ -102,7 +103,7 @@ that message. **Clear all** resets the finder.
 
 1. Tick the checkbox on one or more sessions — or **Select all** for the
    whole project. The top bar shows the selection count.
-2. Click **⬇ Export…** and pick a preset (Chat SFT, Agentic SFT, CPT corpus,
+2. Click **⬇ Export for training…** and pick a preset (Chat SFT, Agentic SFT, CPT corpus,
    or Everything). Presets set sensible option combinations; you can adjust
    anything.
 3. Confirm the output folder (prefilled under `~/Downloads/`, must be
@@ -132,9 +133,11 @@ distinct from a dataset export:
 cursordump backup --out ~/Documents/cursordump-backup
 ```
 
-or **🗄 Backup…** in the UI. Re-running into the same folder is incremental;
-`cursordump verify <backup>` checks integrity and
-`cursordump restore --from <backup>` copies it back. See
+or **🗄 Create backup…** in the UI. Re-running into the same folder is
+incremental; `cursordump verify <backup>` checks integrity and
+`cursordump restore --from <backup>` copies it back. To browse a backup
+later, use the **Viewing ▾** menu (top left) → **Open backup…** — or launch
+directly on it with `cursordump /path/to/backup`. See
 [backup.md](backup.md) for details.
 
 ## Next steps

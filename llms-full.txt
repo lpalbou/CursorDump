@@ -109,7 +109,7 @@ cursordump /path/to/projects   # explore a custom root (e.g. a backup)
 ```
 
 Then, in the UI: pick a project (left), tick the sessions you want (middle),
-and press **⬇ Export…** or **🗄 Backup…** (top bar). See
+and press **⬇ Export for training…** or **🗄 Create backup…** (top bar). See
 [docs/getting-started.md](docs/getting-started.md) for a full first run.
 
 ## Headless CLI
@@ -291,7 +291,8 @@ are never modified, locked, or disturbed.
 The page has three panels plus a top bar:
 
 - **Top bar** — the unified finder (keyword, media chips, tools dropdown),
-  the live "N selected" count, **⬇ Export…**, **🗄 Backup…**, and a
+  the **Viewing** source chip (live Cursor data or an opened backup), the
+  live "N selected" count, **⬇ Export for training…**, **🗄 Create backup…**, and a
   "🔒 read-only" reminder.
 - **Projects** (left) — every project, most recently active first. Each row
   shows two chips: blue = main sessions, amber = subagent transcripts. Click
@@ -325,7 +326,7 @@ that message. **Clear all** resets the finder.
 
 1. Tick the checkbox on one or more sessions — or **Select all** for the
    whole project. The top bar shows the selection count.
-2. Click **⬇ Export…** and pick a preset (Chat SFT, Agentic SFT, CPT corpus,
+2. Click **⬇ Export for training…** and pick a preset (Chat SFT, Agentic SFT, CPT corpus,
    or Everything). Presets set sensible option combinations; you can adjust
    anything.
 3. Confirm the output folder (prefilled under `~/Downloads/`, must be
@@ -355,9 +356,11 @@ distinct from a dataset export:
 cursordump backup --out ~/Documents/cursordump-backup
 ```
 
-or **🗄 Backup…** in the UI. Re-running into the same folder is incremental;
-`cursordump verify <backup>` checks integrity and
-`cursordump restore --from <backup>` copies it back. See
+or **🗄 Create backup…** in the UI. Re-running into the same folder is
+incremental; `cursordump verify <backup>` checks integrity and
+`cursordump restore --from <backup>` copies it back. To browse a backup
+later, use the **Viewing ▾** menu (top left) → **Open backup…** — or launch
+directly on it with `cursordump /path/to/backup`. See
 [backup.md](backup.md) for details.
 
 ## Next steps
@@ -602,8 +605,8 @@ restored at any time.
 
 ## Creating a backup
 
-In the UI: **🗄 Backup…** (top bar) → all projects or the selected one →
-choose a folder outside `~/.cursor` → **Back up**.
+In the UI: **🗄 Create backup…** (top bar) → all projects or the selected
+one → choose a folder outside `~/.cursor` → **Create backup**.
 
 From the CLI:
 
@@ -647,13 +650,30 @@ launchd, or a Cursor hook). Subset re-runs (`--project X`) merge into the
 manifest: records for projects outside the run are preserved. Changed
 external attachments are re-copied and re-hashed.
 
+## Opening a backup (read-only)
+
+From a running CursorDump, use the **Viewing ▾** chip (top left) →
+**Open backup…** and paste the backup folder's path. The whole explorer —
+projects, sessions, thinking traces, attachments, finder, training export —
+then works against the backup, clearly marked *Viewing: Backup* in amber.
+Opening is read-only; switch back with **Viewing ▾ → Live Cursor data**.
+Only genuine CursorDump backups (recognized by `cursordump-backup.json`)
+can be opened this way; the *Create backup* button is disabled while a
+backup is open, since backups are created from live data.
+
+You can also launch directly on a backup:
+
+```bash
+cursordump ~/Documents/cursordump-backup      # backup root or its projects/ dir
+```
+
 ## Exploring a backup without Cursor
 
 The backup bundles the `cursordump` binary, so it is self-contained:
 
 ```bash
 cd ~/Documents/cursordump-backup
-./cursordump projects
+./cursordump .        # opens the explorer on the backup itself
 ```
 
 This opens the full explorer — sessions, thinking traces, attachments,

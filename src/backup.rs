@@ -779,9 +779,9 @@ fn write_readme(
         "## Re-explore WITHOUT Cursor\n\n\
          This backup is self-contained. The bundled `cursordump` app opens the\n\
          full explorer (projects, sessions, thinking, attachments, search,\n\
-         dataset export) directly on this backup — Cursor does not need to be\n\
+         training export) directly on this backup — Cursor does not need to be\n\
          installed:\n\n\
-         ```bash\ncd \"$(dirname \"$0\")\" 2>/dev/null || true\n./cursordump projects\n```\n\n\
+         ```bash\ncd /path/to/this/backup\n./cursordump .\n```\n\n\
          (First run on macOS may require: `xattr -d com.apple.quarantine cursordump`.)\n\
          If the bundled binary doesn't match your OS/architecture, build\n\
          CursorDump from source and run `cursordump /path/to/this/backup/projects`.\n\n"
@@ -807,6 +807,87 @@ fn write_readme(
         summary.projects, summary.files_copied, summary.files_unchanged, mb
     );
     fs::write(out_dir.join("README.md"), card).map_err(|e| e.to_string())
+}
+
+// ----------------------------------------------------------- source resolve
+
+/// A user-supplied path resolved to an explorable projects root.
+#[derive(Debug, Clone)]
+pub struct ResolvedSource {
+    /// The directory to scan for projects.
+    pub projects_root: PathBuf,
+    /// True when the path belongs to a CursorDump backup (marker verified).
+    pub is_backup: bool,
+    /// Display label (backup folder name, or the directory name).
+    pub label: String,
+    /// Backup creation time from the manifest, when available.
+    pub created_unix: Option<u64>,
+}
+
+/// Resolve a path a user points CursorDump at. Accepts, in order:
+/// 1. a backup ROOT (contains `cursordump-backup.json` + `projects/`) — the
+///    common case when someone pastes the backup folder;
+/// 2. a backup's `projects/` subdirectory (marker one level up);
+/// 3. any other existing directory, treated as a bare projects root
+///    (`allow_plain_dir` — the CLI permits this, the runtime API does not).
+pub fn resolve_source_path(p: &Path, allow_plain_dir: bool) -> Result<ResolvedSource, String> {
+    let expand = |p: &Path| -> PathBuf {
+        let s = p.to_string_lossy();
+        if let Some(rest) = s.strip_prefix("~/") {
+            if let Some(home) = dirs::home_dir() {
+                return home.join(rest);
+            }
+        }
+        p.to_path_buf()
+    };
+    let p = expand(p);
+    if !p.is_dir() {
+        return Err(format!(
+            "No folder found at {}. Check the path and try again.",
+            p.display()
+        ));
+    }
+    let name_of = |d: &Path| {
+        d.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| d.display().to_string())
+    };
+    let created_from = |marker: &Path| -> Option<u64> {
+        let m: serde_json::Value = serde_json::from_str(&fs::read_to_string(marker).ok()?).ok()?;
+        m.get("created_unix")?.as_u64()
+    };
+    // Case 1: backup root.
+    if p.join(MARKER).is_file() && p.join("projects").is_dir() {
+        return Ok(ResolvedSource {
+            projects_root: p.join("projects"),
+            is_backup: true,
+            label: name_of(&p),
+            created_unix: created_from(&p.join(MARKER)),
+        });
+    }
+    // Case 2: the backup's projects/ dir itself.
+    if let Some(parent) = p.parent() {
+        if parent.join(MARKER).is_file() {
+            return Ok(ResolvedSource {
+                projects_root: p.clone(),
+                is_backup: true,
+                label: name_of(parent),
+                created_unix: created_from(&parent.join(MARKER)),
+            });
+        }
+    }
+    // Case 3: bare directory (CLI only).
+    if allow_plain_dir {
+        return Ok(ResolvedSource {
+            projects_root: p.clone(),
+            is_backup: false,
+            label: name_of(&p),
+            created_unix: None,
+        });
+    }
+    Err(format!(
+        "This folder isn't a CursorDump backup — no {MARKER} inside it (or one level up)."
+    ))
 }
 
 // ------------------------------------------------------------------ verify
@@ -1453,6 +1534,41 @@ mod tests {
         fs::remove_file(&copy).unwrap();
         let r3 = verify_backup(&out).unwrap();
         assert_eq!(r3.transcripts_missing.len(), 1);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolves_backup_root_projects_subdir_and_plain_dirs() {
+        let base = std::env::temp_dir().join("cursordump-resolve-test");
+        let _ = fs::remove_dir_all(&base);
+        // A minimal backup layout.
+        let bk = base.join("bk");
+        fs::create_dir_all(bk.join("projects/p")).unwrap();
+        fs::write(bk.join(MARKER), r#"{"created_unix": 1234}"#).unwrap();
+
+        // 1. Backup ROOT → projects/ subdir, is_backup, created picked up.
+        let r = resolve_source_path(&bk, false).unwrap();
+        assert!(r.is_backup);
+        assert_eq!(r.projects_root, bk.join("projects"));
+        assert_eq!(r.created_unix, Some(1234));
+        assert_eq!(r.label, "bk");
+
+        // 2. The projects/ subdir itself also resolves to the same backup.
+        let r2 = resolve_source_path(&bk.join("projects"), false).unwrap();
+        assert!(r2.is_backup);
+        assert_eq!(r2.projects_root, bk.join("projects"));
+
+        // 3. A plain directory: rejected without the CLI escape hatch,
+        //    accepted with it (never classified as a backup).
+        let plain = base.join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        assert!(resolve_source_path(&plain, false).is_err());
+        let r3 = resolve_source_path(&plain, true).unwrap();
+        assert!(!r3.is_backup);
+        assert_eq!(r3.projects_root, plain);
+
+        // 4. Nonexistent path errors either way.
+        assert!(resolve_source_path(&base.join("nope"), true).is_err());
         let _ = fs::remove_dir_all(&base);
     }
 

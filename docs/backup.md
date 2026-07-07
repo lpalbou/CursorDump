@@ -13,8 +13,8 @@ restored at any time.
 
 ## Creating a backup
 
-In the UI: **🗄 Backup…** (top bar) → all projects or the selected one →
-choose a folder outside `~/.cursor` → **Back up**.
+In the UI: **🗄 Create backup…** (top bar) → all projects or the selected
+one → choose a folder outside `~/.cursor` → **Create backup**.
 
 From the CLI:
 
@@ -58,13 +58,30 @@ launchd, or a Cursor hook). Subset re-runs (`--project X`) merge into the
 manifest: records for projects outside the run are preserved. Changed
 external attachments are re-copied and re-hashed.
 
+## Opening a backup (read-only)
+
+From a running CursorDump, use the **Viewing ▾** chip (top left) →
+**Open backup…** and paste the backup folder's path. The whole explorer —
+projects, sessions, thinking traces, attachments, finder, training export —
+then works against the backup, clearly marked *Viewing: Backup* in amber.
+Opening is read-only; switch back with **Viewing ▾ → Live Cursor data**.
+Only genuine CursorDump backups (recognized by `cursordump-backup.json`)
+can be opened this way; the *Create backup* button is disabled while a
+backup is open, since backups are created from live data.
+
+You can also launch directly on a backup:
+
+```bash
+cursordump ~/Documents/cursordump-backup      # backup root or its projects/ dir
+```
+
 ## Exploring a backup without Cursor
 
 The backup bundles the `cursordump` binary, so it is self-contained:
 
 ```bash
 cd ~/Documents/cursordump-backup
-./cursordump projects
+./cursordump .        # opens the explorer on the backup itself
 ```
 
 This opens the full explorer — sessions, thinking traces, attachments,

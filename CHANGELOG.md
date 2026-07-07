@@ -2,6 +2,43 @@
 
 All notable changes to CursorDump are documented here.
 
+## [Unreleased]
+
+### Added
+- **Data-source switching in the UI.** A "Viewing" chip in the top bar shows
+  whether you are on Live Cursor data or an opened backup (amber, with the
+  backup's creation date), with a menu to switch: Live Cursor data, recent
+  backups (remembered in the browser), and "Open backup…" (paste the backup
+  folder's path; its `projects/` subfolder works too). Switching resets the
+  selection, finder, and open session (they are keyed to the previous
+  source). The welcome screen gains an "Open a backup" card and, on machines
+  without Cursor data, becomes a backup picker.
+- The CLI positional argument now accepts a backup ROOT (the folder holding
+  `cursordump-backup.json`), not just its `projects/` subfolder — inside a
+  backup, `./cursordump .` opens the explorer.
+
+### Security
+- Runtime source switching only accepts the boot-detected local root and
+  marker-verified CursorDump backups — never arbitrary directories.
+- When viewing a backup, transcript-referenced external file paths are NOT
+  served by `/api/media` (a hostile backup could reference any local file);
+  only the backup's own mirror and captured attachments are served.
+- Transcript reads canonicalize into the source root, so a symlinked
+  `.jsonl` planted in a backup cannot escape it.
+- Export/backup destination guards always protect the real `~/.cursor`,
+  independent of the source being viewed; creating a backup while viewing a
+  backup is refused.
+
+### Changed
+- **Clearer vocabulary across the UI** separating the four actions: the
+  export button is now "⬇ Export for training…", the backup button
+  "🗄 Create backup…" (dialog: "Create a backup"), the source chip reads
+  "Viewing: Live Cursor data" / "Viewing: Backup — name (date)", and the
+  source menu offers "Open backup…". Welcome cards updated to match, with
+  cross-references between the export and backup dialogs.
+- Welcome panel: aligned card layout, and every card is clickable (focus
+  finder, browse, export, backup, open backup).
+
 ## [0.9.0] — 2026-07-07
 
 Installation without a Rust toolchain, and first-class backup verification

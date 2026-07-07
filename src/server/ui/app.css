@@ -223,19 +223,38 @@ aside {
 
 .msg.flash { animation: flash 1.6s ease-out; }
 @keyframes flash {
-  0% { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
-  100% { border-color: var(--border); box-shadow: none; }
+  /* Only the shadow animates so the role-tinted border color is preserved. */
+  0% { box-shadow: 0 0 0 2px var(--accent); }
+  100% { box-shadow: none; }
 }
 mark { background: rgba(232,179,90,.35); color: #ffe9c2; border-radius: 3px; padding: 0 1px; }
 
+/* Chat-style bubbles: assistant left (green tint), user right (blue tint),
+   like a messaging app. Everything inside (badges, thinking, tool chips,
+   attachments) is unchanged. */
 .msg {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 14px;
   padding: 12px 14px;
   margin-bottom: 12px;
+  max-width: 82%;
+  width: fit-content;
+  min-width: min(340px, 100%);
   content-visibility: auto;          /* cheap perf win on long sessions */
   contain-intrinsic-size: auto 120px;
+}
+.msg.assistant {
+  margin-right: auto;
+  border-bottom-left-radius: 4px;    /* the classic bubble "tail" corner */
+  background: rgba(120,205,140,.07);
+  border-color: rgba(120,205,140,.22);
+}
+.msg.user {
+  margin-left: auto;
+  border-bottom-right-radius: 4px;
+  background: rgba(94,156,255,.09);
+  border-color: rgba(94,156,255,.26);
 }
 .msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .badge {

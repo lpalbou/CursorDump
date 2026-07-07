@@ -405,7 +405,8 @@ async function openSession(path, focusLine, updateHash = true) {
 const PREVIEW = 1600;
 
 function messageCard(m, idx, highlight) {
-  const card = el("div", "msg");
+  // Chat-style bubbles: assistant on the left (green), user on the right (blue).
+  const card = el("div", "msg " + m.role);
   const head = el("div", "msg-head");
   head.append(el("span", "badge " + m.role, m.role.toUpperCase()));
   head.append(el("span", "msg-idx", "#" + idx));

@@ -850,7 +850,24 @@ function applyPreset(name) {
   document.querySelectorAll(".preset").forEach(b => b.classList.toggle("active", b.dataset.preset === name));
 }
 
+/* Bootstrap failure (typically a stale token after a server restart) must be
+   explained ON SCREEN, not buried in the console. */
+function renderLocked(message) {
+  const v = $("viewer");
+  v.replaceChildren();
+  const w = el("div", "welcome");
+  w.append(el("div", "logo", "◆"));
+  w.append(el("h1", null, "CursorDump"));
+  w.append(el("p", "source-note", "🔒 This tab is no longer authorized."));
+  w.append(el("p", "muted", message));
+  w.append(el("p", "muted", "The access link changes on every server start. Check the terminal running cursordump and open the printed URL (http://127.0.0.1:…/?token=…)."));
+  v.append(w);
+}
+
 renderWelcome();
 renderFinderBar();
 ensureTools();
-loadProjects().then(applyHash);
+loadProjects().then(applyHash).catch((e) => {
+  sessionStorage.removeItem("cd_token"); // stale token: don't keep replaying it
+  renderLocked(e.message);
+});

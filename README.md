@@ -56,7 +56,13 @@ download an archive from the releases page manually.
 brew install lpalbou/tap/cursordump
 ```
 
-**From source** — requires Rust stable (1.75+):
+**Cargo** (crates.io, requires Rust stable 1.75+):
+
+```bash
+cargo install cursordump
+```
+
+**From source**:
 
 ```bash
 git clone https://github.com/lpalbou/cursordump

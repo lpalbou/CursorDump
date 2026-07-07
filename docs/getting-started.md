@@ -30,8 +30,14 @@ any distribution. Archives are also downloadable from the
 brew install lpalbou/tap/cursordump
 ```
 
-**From source** (Rust stable, MSRV 1.75 — install via
+**Cargo** (crates.io — Rust stable, MSRV 1.75, install via
 [rustup](https://rustup.rs)):
+
+```bash
+cargo install cursordump
+```
+
+**From source**:
 
 ```bash
 git clone https://github.com/lpalbou/cursordump

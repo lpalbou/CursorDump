@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CursorDump</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">◆ CursorDump</div>
+  <div class="finder">
+    <input id="search-input" type="search" placeholder="Find in messages…  (/ to focus)">
+    <span class="finder-facets" id="media-chips"></span>
+    <div class="tools-dd">
+      <button id="tools-btn" class="btn" type="button">🔧 Tools ▾</button>
+      <div id="tools-menu" class="tools-menu" hidden></div>
+    </div>
+    <span id="scope-chip"></span>
+    <button id="finder-clear" class="btn" title="Clear all filters" hidden>Clear all</button>
+    <span id="search-msg"></span>
+  </div>
+  <div class="grow"></div>
+  <div id="selection-summary" class="muted">0 selected</div>
+  <button id="export-btn" class="btn primary" disabled>⬇ Export…</button>
+  <button id="backup-btn" class="btn" title="Full verbatim backup of all Cursor projects">🗄 Backup…</button>
+  <span class="readonly" title="CursorDump never writes to ~/.cursor">🔒 read-only</span>
+</header>
+
+<main id="layout">
+  <aside id="projects-pane">
+    <div class="pane-head">
+      <h2>Projects</h2>
+      <button id="rescan-btn" class="btn small" title="Rescan ~/.cursor/projects">⟳</button>
+    </div>
+    <input id="project-filter" type="search" placeholder="filter projects…">
+    <div id="project-list" class="list"></div>
+  </aside>
+
+  <aside id="sessions-pane">
+    <div class="pane-head">
+      <h2>Sessions</h2>
+      <div class="pane-actions">
+        <button id="select-all-btn" class="btn small">Select all</button>
+        <button id="clear-proj-btn" class="btn small">Clear</button>
+      </div>
+    </div>
+    <input id="session-filter" type="search" placeholder="filter sessions…">
+    <div id="session-list" class="list"></div>
+  </aside>
+
+  <section id="main-pane">
+    <div id="viewer"></div>
+  </section>
+</main>
+
+<dialog id="export-dialog">
+  <form method="dialog" id="export-form">
+    <h2>Export dataset</h2>
+    <p id="export-count" class="muted"></p>
+
+    <div class="presets">
+      <span class="lbl">Preset</span>
+      <button type="button" class="btn preset" data-preset="chat">Chat SFT</button>
+      <button type="button" class="btn preset" data-preset="agentic">Agentic SFT</button>
+      <button type="button" class="btn preset" data-preset="cpt">CPT corpus</button>
+      <button type="button" class="btn preset" data-preset="all">Everything</button>
+    </div>
+
+    <div class="opt-grid">
+      <fieldset>
+        <legend>Formats</legend>
+        <label><input type="checkbox" id="o-sft-chatml" checked> SFT · ChatML — Unsloth / HF</label>
+        <label><input type="checkbox" id="o-sft-sharegpt"> SFT · ShareGPT</label>
+        <label><input type="checkbox" id="o-cpt-jsonl"> CPT · JSONL {"text"}</label>
+        <label><input type="checkbox" id="o-cpt-txt"> CPT · .txt files — ForgeLLM</label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Thinking</legend>
+        <label><input type="radio" name="thinking" value="tagged" checked> capture as &lt;think&gt; tags</label>
+        <label><input type="radio" name="thinking" value="verbatim"> keep verbatim inline</label>
+        <label><input type="radio" name="thinking" value="strip"> strip (answer only)</label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Subagents</legend>
+        <label><input type="radio" name="subagents" value="inline" checked> inline results into master</label>
+        <label><input type="radio" name="subagents" value="separate"> separate conversations</label>
+        <label><input type="radio" name="subagents" value="drop"> drop</label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Content</legend>
+        <label><input type="checkbox" id="o-clean" checked> clean links &amp; dangling intents</label>
+        <label><input type="checkbox" id="o-tools"> include tool calls</label>
+        <label><input type="checkbox" id="o-final-only"> final response only</label>
+        <label><input type="checkbox" id="o-raw-user"> raw user records</label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Media &amp; misc</legend>
+        <label><input type="checkbox" id="o-media" checked> copy referenced media</label>
+        <label><input type="checkbox" id="o-inline-attach"> inline readable attachments (CPT)</label>
+        <label><input type="checkbox" id="o-metadata" checked> metadata column</label>
+        <label>val split <input type="number" id="o-val" min="0" max="0.3" step="0.05" value="0" class="num"></label>
+      </fieldset>
+    </div>
+
+    <div class="outrow">
+      <span class="lbl">Output folder</span>
+      <input id="o-outdir" type="text" spellcheck="false">
+    </div>
+
+    <div id="export-result"></div>
+
+    <div class="dialog-actions">
+      <button type="button" id="do-export" class="btn primary">⬇ Export</button>
+      <button type="button" id="close-dialog" class="btn">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="backup-dialog">
+  <form method="dialog" id="backup-form">
+    <h2>🗄 Full backup</h2>
+    <p class="muted">A verbatim copy of your Cursor projects — every transcript, subagent,
+      asset, upload, canvas and terminal — so nothing is lost if Cursor flushes its data.
+      Re-running into the same folder is incremental (only changed files are copied).</p>
+
+    <fieldset>
+      <legend>Scope</legend>
+      <label><input type="radio" name="bk-scope" value="all" checked> all projects</label>
+      <label><input type="radio" name="bk-scope" value="current"> only the selected project (<span id="bk-current">none</span>)</label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Options</legend>
+      <label><input type="checkbox" id="bk-include-app" checked> bundle the CursorDump app (re-explore the backup without Cursor)</label>
+      <label><input type="checkbox" id="bk-attachments" checked> capture referenced workspace attachments (@files outside ~/.cursor)</label>
+      <label><input type="checkbox" id="bk-verify" checked> record sha256 for transcripts (integrity)</label>
+      <label><input type="checkbox" id="bk-skip-runtime"> skip regenerable runtime dirs (terminals, agent-tools)</label>
+    </fieldset>
+
+    <div class="outrow">
+      <span class="lbl">Backup folder</span>
+      <input id="bk-outdir" type="text" spellcheck="false">
+    </div>
+
+    <div id="backup-result"></div>
+
+    <div class="dialog-actions">
+      <button type="button" id="do-backup" class="btn primary">🗄 Back up</button>
+      <button type="button" id="close-backup" class="btn">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>

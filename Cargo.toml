@@ -1,0 +1,25 @@
+[package]
+name = "cursordump"
+version = "0.6.2"
+edition = "2021"
+description = "Explore Cursor agent sessions, export them as SFT/CPT training datasets, and make full Cursor-independent backups"
+license = "MIT"
+authors = ["Laurent-Philippe Albou <contact@abstractframework.ai>"]
+repository = "https://github.com/lpalbou/cursordump"
+readme = "README.md"
+keywords = ["cursor", "llm", "fine-tuning", "dataset", "backup"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+dirs = "6"
+sha2 = "0.10"
+anyhow = "1"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+open = "5"
+
+[profile.release]
+opt-level = 3

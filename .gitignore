@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Local scratch / test outputs (never commit user session data)
+/tmp/
+*.log
+
+# Local dumps and backups accidentally created inside the repo
+/cursordump-*/
+/dump*/
+/backup*/
+/my-dataset*/

@@ -247,15 +247,18 @@ mark { background: rgba(232,179,90,.35); color: #ffe9c2; border-radius: 3px; pad
 .msg.assistant {
   margin-right: auto;
   border-bottom-left-radius: 4px;    /* the classic bubble "tail" corner */
-  background: rgba(120,205,140,.07);
-  border-color: rgba(120,205,140,.22);
+  background: #17251d;               /* deep desaturated green (WhatsApp-dark-like) */
+  border: none;
+  box-shadow: 0 1px 2px rgba(0,0,0,.25);
 }
 .msg.user {
   margin-left: auto;
   border-bottom-right-radius: 4px;
-  background: rgba(94,156,255,.09);
-  border-color: rgba(94,156,255,.26);
+  background: #1b2c47;               /* deep desaturated blue (iMessage-dark-like) */
+  border: none;
+  box-shadow: 0 1px 2px rgba(0,0,0,.25);
 }
+.msg-time { margin-left: auto; color: var(--text-faint); font-size: 11px; white-space: nowrap; }
 .msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .badge {
   font-size: 11px; font-weight: 700; letter-spacing: .05em;

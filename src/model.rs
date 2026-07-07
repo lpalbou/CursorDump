@@ -88,6 +88,11 @@ pub struct Message {
     /// 0-based line number of this record in the source transcript, used to
     /// map search hits (which index raw lines) to parsed messages.
     pub line_index: usize,
+    /// Wall-clock time of the message when Cursor recorded one. Transcript
+    /// records carry no timestamp field; the only real time data is the
+    /// `<timestamp>` tag the harness injects into some USER records, so this
+    /// is present only where that tag exists (never fabricated).
+    pub timestamp: Option<String>,
 }
 
 impl Message {

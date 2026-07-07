@@ -101,6 +101,13 @@ fn record_from_value(value: &Value, line_index: usize) -> RecordKind {
             Some(q) => is_injected_query(q),
             None => true, // no <user_query> tag => system-injected context
         };
+    // The only genuine per-message time data: the harness-injected
+    // <timestamp> tag present in some user records.
+    let timestamp = if role == Role::User {
+        extract_tag(&text, "timestamp")
+    } else {
+        None
+    };
     RecordKind::Message(Message {
         role,
         has_user_query: user_query.is_some(),
@@ -108,7 +115,18 @@ fn record_from_value(value: &Value, line_index: usize) -> RecordKind {
         is_injected,
         blocks,
         line_index,
+        timestamp,
     })
+}
+
+/// Extract the content of the first `<tag>…</tag>` pair in `text`.
+fn extract_tag(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    let inner = text[start..end].trim();
+    (!inner.is_empty()).then(|| inner.to_string())
 }
 
 fn parse_blocks(content: Option<&Value>) -> Vec<Block> {
@@ -252,6 +270,27 @@ mod tests {
             is_subagent: false,
             parent_id: None,
         }
+    }
+
+    #[test]
+    fn extracts_harness_timestamp_from_user_records_only() {
+        let content = concat!(
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Tuesday, Jul 7, 2026, 2:35 PM (UTC+2)</timestamp>\n<user_query>hi</user_query>"}]}}"#,
+            "\n",
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"hello <timestamp>fake</timestamp>"}]}}"#,
+            "\n",
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"<user_query>no time here</user_query>"}]}}"#,
+            "\n",
+        );
+        let parsed = parse_content(meta(), content);
+        assert_eq!(
+            parsed.messages[0].timestamp.as_deref(),
+            Some("Tuesday, Jul 7, 2026, 2:35 PM (UTC+2)")
+        );
+        // Assistant text never carries a real timestamp tag; never extracted.
+        assert_eq!(parsed.messages[1].timestamp, None);
+        // Absent tag => None (never fabricated).
+        assert_eq!(parsed.messages[2].timestamp, None);
     }
 
     #[test]

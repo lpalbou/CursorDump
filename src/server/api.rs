@@ -273,6 +273,7 @@ pub async fn session(
                 "tools": tools,
                 "media": media,
                 "line_index": m.line_index,
+                "timestamp": m.timestamp,
             })
         })
         .collect();

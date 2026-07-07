@@ -404,6 +404,13 @@ async function openSession(path, focusLine, updateHash = true) {
 
 const PREVIEW = 1600;
 
+/* Compact a harness timestamp like "Tuesday, Jul 7, 2026, 2:35 PM (UTC+2)"
+   to "Jul 7, 2:35 PM" for the bubble corner; full text stays in the tooltip. */
+function shortTimestamp(t) {
+  const m = t.match(/([A-Z][a-z]{2} \d{1,2}), \d{4}, (\d{1,2}:\d{2}\s*[AP]M)/);
+  return m ? `${m[1]}, ${m[2]}` : t;
+}
+
 function messageCard(m, idx, highlight) {
   // Chat-style bubbles: assistant on the left (green), user on the right (blue).
   const card = el("div", "msg " + m.role);
@@ -416,6 +423,13 @@ function messageCard(m, idx, highlight) {
     head.append(b);
   }
   if (m.media && m.media.length) head.append(el("span", "msg-idx", "📎 " + m.media.length));
+  if (m.timestamp) {
+    // Only some user records carry a harness <timestamp> tag; shown where
+    // real, never fabricated.
+    const ts = el("span", "msg-time", shortTimestamp(m.timestamp));
+    ts.title = m.timestamp;
+    head.append(ts);
+  }
   card.append(head);
 
   if (m.thinking && m.thinking.trim()) {

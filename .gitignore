@@ -17,3 +17,6 @@
 /dump*/
 /backup*/
 /my-dataset*/
+
+# Maintainer-only notes and instructions (never published)
+/untracked/
